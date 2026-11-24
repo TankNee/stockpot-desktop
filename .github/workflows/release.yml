@@ -96,12 +96,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      # macOS 的 find 是 BSD 版，没有 -printf，这里只能用 -exec ls
       - name: 列出产物
         shell: bash
         run: |
           find src-tauri/target -maxdepth 6 -path "*/bundle/*" -type f \
             \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.tar.gz" -o -name "*.sig" \) \
-            -printf "%p  %k KB\n" | sort
+            -exec ls -lh {} \;
 
       # 直接投到自己的更新服务器，客户端下次点「检查更新」就能看到
       - name: 传到更新服务器
