@@ -1,0 +1,51 @@
+name: Coverage
+
+# Rust 侧的单元测试覆盖率。Tauri 的 crate 在 Linux 上要 webkit 那套系统库，
+# 所以别指望本地 Windows 一键跑通——放这儿每次推都算一遍。
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/coverage.yml"
+  pull_request:
+    paths:
+      - "src-tauri/**"
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: cargo llvm-cov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tauri 的系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: coverage
+
+      # 只算 lib 里的单测：同步、存储、账本这些逻辑都在这儿
+      - name: 跑覆盖率
+        working-directory: src-tauri
+        run: |
+          cargo llvm-cov --lib --lcov --output-path lcov.info
+          echo "===== 汇总 ====="
+          cargo llvm-cov --lib --summary-only
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-${{ github.sha }}
+          path: src-tauri/lcov.info
+          if-no-files-found: error
