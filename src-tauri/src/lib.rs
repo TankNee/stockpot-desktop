@@ -248,10 +248,10 @@ async fn sync_run(app: AppHandle, mode: String) -> Result<serde_json::Value, Str
     }
 
     let state = app.state::<AppState>();
-    let payload = state.payload();
     broadcast(&app, &state);
-    // 账本窗口自己读文件，给它一个提示重新加载
-    let _ = app.emit("ledger-changed", serde_json::json!({}));
+    // 账本窗口拿到的是整份账本，不是空对象——它会把 payload 直接当文档渲染，
+    // 传空的话 entries 是 undefined，整页就白屏了（macOS 上踩过）
+    let _ = app.emit("ledger-changed", ledger::load(&state.dir));
 
     Ok(serde_json::json!({
         "mode": applied,

@@ -432,7 +432,12 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
     let unlisten: (() => void) | undefined;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<Ledger>("ledger-changed", (event) => setLedger(event.payload));
+      unlisten = await listen<Ledger>("ledger-changed", (event) => {
+        // 后端要是发了个不完整的文档，宁可先不换：塞进去会让整页渲染炸掉
+        const next = event.payload;
+        if (!next || !Array.isArray(next.entries)) return;
+        setLedger(next);
+      });
     })();
     return () => unlisten?.();
   }, []);
