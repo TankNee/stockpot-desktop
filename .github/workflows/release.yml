@@ -1,25 +1,47 @@
 name: Release
 
-# 打个 tag 推上来就出安装包：
+# 打个 tag 就出两个平台的包，并推到自己的更新服务器：
 #   git tag v1.0.4 && git push origin v1.0.4
 on:
   push:
     tags:
       - "v*"
 
-# 建 release 和传附件要写权限，其余都不给
 permissions:
   contents: write
 
-# 同一个 tag 不并发跑两遍
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  windows:
-    name: 编译并发布
-    runs-on: windows-latest
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            platform: windows
+            arch: x86_64
+            packaging: nsis
+            args: "--bundles nsis"
+            files: |
+              src-tauri/target/release/bundle/nsis/*.exe
+              src-tauri/target/release/bundle/nsis/*.exe.sig
+          - os: macos-latest
+            label: macOS（universal）
+            platform: macos
+            arch: universal
+            packaging: app
+            args: "--target universal-apple-darwin --bundles app,dmg"
+            files: |
+              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/universal-apple-darwin/release/bundle/macos/*.sig
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +49,7 @@ jobs:
           fetch-depth: 0
 
       # tag、package.json、tauri.conf.json、Cargo.toml 四处版本必须一样，
-      # 不然装出来的包版本和 release 标题对不上，用户会以为下错了
+      # 不然装出来的包版本和 release 标题对不上，自动更新也会来回弹
       - name: 校验版本号
         shell: bash
         run: |
@@ -54,38 +76,102 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Rust 依赖编译最费时间，缓存住之后重跑能省五六分钟
+      # universal 包要两个架构都在，缺一个就只能出单架构的 dmg
+      - name: macOS 补架构
+        if: matrix.platform == 'macos'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.platform }}
 
       - name: 装依赖
         run: pnpm install --frozen-lockfile
 
-      # beforeBuildCommand 里会跑 pnpm build（tsc --noEmit + vite build），
-      # 类型不过就直接停在编译这一步
-      - name: 编译安装包
-        run: pnpm tauri build --bundles nsis
+      # 签名密钥只放在 GitHub Secrets 里：客户端靠这份签名确认包没被换过
+      - name: 编译并签名
+        run: pnpm tauri build ${{ matrix.args }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: 列出产物
         shell: bash
         run: |
-          ls -lh src-tauri/target/release/bundle/nsis/
+          find src-tauri/target -maxdepth 6 -path "*/bundle/*" -type f \
+            \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.tar.gz" -o -name "*.sig" \) \
+            -printf "%p  %k KB\n" | sort
 
-      # 除了发 release，也存一份 artifact：release 那步抽风时还能手工下
+      # 直接投到自己的更新服务器，客户端下次点「检查更新」就能看到
+      - name: 传到更新服务器
+        shell: bash
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DEPLOY_BASE: ${{ vars.DEPLOY_BASE }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          PACKAGING: ${{ matrix.packaging }}
+        run: |
+          set -euo pipefail
+          base="${DEPLOY_BASE:-https://api.stockpot.neeto.cn}"
+          version="${GITHUB_REF_NAME#v}"
+
+          if [ "$PLATFORM" = "windows" ]; then
+            file=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -1)
+          else
+            file=$(ls src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz | head -1)
+          fi
+          sig="${file}.sig"
+          if [ ! -f "$sig" ]; then
+            echo "::error::没找到签名文件 $sig，检查 TAURI_SIGNING_PRIVATE_KEY 有没有配上"
+            exit 1
+          fi
+
+          # 说明就用上一个 tag 到这次的提交，命令行里看也算清楚
+          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$prev" ]; then
+            body=$(git log --pretty=format:"- %s" "$prev"..HEAD | head -30)
+          else
+            body=$(git log --pretty=format:"- %s" -20 | head -30)
+          fi
+          notes=$(printf '## %s\n\n%s\n' "$version" "$body")
+
+          echo "投 $PLATFORM $version ← $(basename "$file")"
+          curl -sS --fail-with-body -X POST \
+            "$base/api/v1/deploy/$PLATFORM?version=$version&arch=$ARCH&packaging=$PACKAGING" \
+            -H "authorization: Bearer $DEPLOY_TOKEN" \
+            -H "x-notes-b64: $(printf '%s' "$notes" | base64 | tr -d '\n')" \
+            -H "x-signature-b64: $(base64 < "$sig" | tr -d '\n')" \
+            --data-binary @"$file"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: stockpot-windows-${{ github.ref_name }}
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          name: stockpot-${{ matrix.platform }}-${{ github.ref_name }}
+          path: ${{ matrix.files }}
           if-no-files-found: error
 
-      - name: 发布 release
-        uses: softprops/action-gh-release@v2
+  release:
+    name: 发布 release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: 整理文件
+        run: |
+          mkdir -p out
+          find dist -type f \( -name "*.exe" -o -name "*.msi" -o -name "*.dmg" -o -name "*.app.tar.gz" \) \
+            -exec cp {} out/ \;
+          ls -lh out
+
+      - uses: softprops/action-gh-release@v2
         with:
           name: Stockpot ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: false
-          # 提交记录由 GitHub 按上一个 tag 到这之间的 commit 自动生成
           generate_release_notes: true
-          files: src-tauri/target/release/bundle/nsis/*.exe
+          files: out/*

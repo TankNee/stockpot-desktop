@@ -18,3 +18,6 @@ keystore.properties
 
 # 抓取或临时脚本产出的东西
 .tmp/
+
+# 更新签名私钥只在本机 ~/.tauri，别误提交
+*.key

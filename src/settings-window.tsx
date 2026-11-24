@@ -2692,6 +2692,111 @@ function ReclassifyReview({
   );
 }
 
+/**
+ * 更新一块：点一下问自己的服务器，有新版就下载并交给安装器。
+ *
+ * 不打自动检查——一个菜单栏小组件偷偷重启自己很烦。用户点的时候才查，
+ * 进度和结果都写在这一行里，不弹窗。
+ */
+function UpdateBlock() {
+  const { t } = useStore();
+  const [status, setStatus] = React.useState<
+    "idle" | "checking" | "latest" | "found" | "downloading" | "failed"
+  >("idle");
+  const [found, setFound] = React.useState("");
+  const [progress, setProgress] = React.useState(0);
+  const [error, setError] = React.useState("");
+  const updateRef = React.useRef<{ downloadAndInstall: (cb: (e: unknown) => void) => Promise<void> } | null>(null);
+
+  async function checkNow() {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    setStatus("checking");
+    setError("");
+    try {
+      const mod = await import("@tauri-apps/plugin-updater");
+      const update = await mod.check();
+      if (!update) {
+        setStatus("latest");
+        return;
+      }
+      updateRef.current = update as unknown as {
+        downloadAndInstall: (cb: (e: unknown) => void) => Promise<void>;
+      };
+      setFound(update.version);
+      setStatus("found");
+    } catch (e) {
+      setStatus("failed");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function installNow() {
+    const update = updateRef.current;
+    if (!update) return;
+    setStatus("downloading");
+    setProgress(0);
+    let total = 0;
+    let size = 0;
+    try {
+      await update.downloadAndInstall((event: unknown) => {
+        const payload = event as { event?: string; data?: { contentLength?: number; chunkLength?: number } };
+        if (payload.event === "Started") {
+          size = payload.data?.contentLength ?? 0;
+        } else if (payload.event === "Progress") {
+          total += payload.data?.chunkLength ?? 0;
+          if (size > 0) setProgress(Math.min(1, total / size));
+        }
+      });
+    } catch (e) {
+      setStatus("failed");
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const hint = (() => {
+    switch (status) {
+      case "checking":
+        return t("update.checking");
+      case "latest":
+        return t("update.latest");
+      case "found":
+        return t("update.found", { version: found });
+      case "downloading":
+        return t("update.downloading", { pct: Math.round(progress * 100) });
+      case "failed":
+        return t("update.failed", { error });
+      default:
+        return t("update.hint");
+    }
+  })();
+
+  const busy = status === "checking" || status === "downloading";
+
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
+      <div className="flex min-w-0 flex-col gap-[1px]">
+        <span className="text-[12.5px]">{t("update.title")}</span>
+        <span className={cn("truncate text-[11px]", status === "failed" ? "text-down" : "text-faint")} title={hint}>
+          {hint}
+        </span>
+      </div>
+      <Button
+        variant="secondary"
+        size="sm"
+        className="shrink-0 text-[11.5px]"
+        disabled={busy}
+        onClick={() => void (status === "found" ? installNow() : checkNow())}
+      >
+        {status === "downloading"
+          ? t("update.downloading", { pct: Math.round(progress * 100) })
+          : status === "found"
+            ? t("update.install")
+            : t("update.check")}
+      </Button>
+    </div>
+  );
+}
+
 function AboutTab() {
   const {
     t,
@@ -2794,6 +2899,7 @@ function AboutTab() {
               {t("settings.version", { version })}
             </span>
           </div>
+          <UpdateBlock />
           <p className="text-[11px] leading-relaxed text-faint">{t("about.sources")}</p>
           <p className="text-[11px] leading-relaxed text-faint">{t("about.disclaimer")}</p>
           <div className="flex items-center gap-3 border-t border-border/60 pt-2 text-[11px] text-faint">

@@ -1438,6 +1438,8 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None::<Vec<&str>>,
         ))
+        // 自建服务器的更新：地址和公钥都在 tauri.conf.json 的 plugins.updater 里
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // The Dock tile follows the ledger window. Red-button closes and hides
         // both arrive here, so the policy is re-synced after the window settles
         // rather than by polling.
