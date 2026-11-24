@@ -3,8 +3,11 @@ name: Release
 # 只有 macOS 在这里构建：它需要 macOS runner（.app + dmg 的打包和签名工具链），
 # 本地那台 Windows 出不来。Windows 的 NSIS 包在本地打，打完用同样的 deploy 口投上来。
 #
-#   git tag v1.0.5 && git push origin v1.0.5      → CI 出 macOS
-#   pnpm tauri build --bundles nsis                → 本地出 Windows
+#   git tag v1.0.5 && git push origin v1.0.5      → CI 出 macOS，放进 GitHub release
+#   pnpm tauri build --bundles nsis                → 本地出 Windows，投更新服务器
+#
+# macOS 的包不从 CI 直传服务器（海外 runner 往这边传几十兆太慢），
+# 由管理台的「从 GitHub 同步」按需拉回来。
 on:
   push:
     tags:
@@ -82,40 +85,6 @@ jobs:
             \( -name "*.dmg" -o -name "*.tar.gz" -o -name "*.sig" \) \
             -exec ls -lh {} \;
 
-      # 投到自己的更新服务器，桌面端点「检查更新」就能看到。
-      # 从海外 runner 往这台服务器传几十兆会慢，给足超时。
-      - name: 传到更新服务器
-        shell: bash
-        env:
-          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
-          DEPLOY_BASE: ${{ vars.DEPLOY_BASE }}
-        run: |
-          set -euo pipefail
-          base="${DEPLOY_BASE:-https://api.stockpot.neeto.cn}"
-          version="${GITHUB_REF_NAME#v}"
-          file=$(ls src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz | head -1)
-          sig="${file}.sig"
-          if [ ! -f "$sig" ]; then
-            echo "::error::没找到签名文件 $sig，检查 TAURI_SIGNING_PRIVATE_KEY 有没有配上"
-            exit 1
-          fi
-
-          prev=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -n "$prev" ]; then
-            body=$(git log --pretty=format:"- %s" "$prev"..HEAD | head -30)
-          else
-            body=$(git log --pretty=format:"- %s" -20 | head -30)
-          fi
-          notes=$(printf '## %s\n\n%s\n' "$version" "$body")
-
-          echo "投 macos $version ← $(basename "$file") ($(du -h "$file" | cut -f1))"
-          curl -sS --fail-with-body --max-time 1800 -X POST \
-            "$base/api/v1/deploy/macos?version=$version&arch=universal&packaging=app" \
-            -H "authorization: Bearer $DEPLOY_TOKEN" \
-            -H "x-notes-b64: $(printf '%s' "$notes" | base64 | tr -d '\n')" \
-            -H "x-signature-b64: $(base64 < "$sig" | tr -d '\n')" \
-            --data-binary @"$file"
-
       - uses: actions/upload-artifact@v4
         with:
           name: stockpot-macos-${{ github.ref_name }}
@@ -141,7 +110,7 @@ jobs:
       - name: 整理文件
         run: |
           mkdir -p out
-          find dist -type f \( -name "*.dmg" -o -name "*.app.tar.gz" \) -exec cp {} out/ \;
+          find dist -type f \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.sig" \) -exec cp {} out/ \;
           ls -lh out
 
       # Windows 的 exe 由本地构建完 `gh release upload` 追加到同一个 release
