@@ -376,4 +376,184 @@ mod tests {
         assert_eq!(s["stocks"], json!(1));
         assert_eq!(s["accounts"], json!(2));
     }
+
+    #[test]
+    fn fingerprint_is_stable_and_sensitive() {
+        let a = json!({ "entries": [{ "id": "x" }], "stocks": [] });
+        let b = json!({ "entries": [{ "id": "x" }], "stocks": [] });
+        let c = json!({ "entries": [{ "id": "x" }, { "id": "y" }], "stocks": [] });
+        assert_eq!(fingerprint(&a), fingerprint(&b));
+        assert_ne!(fingerprint(&a), fingerprint(&c));
+    }
+
+    #[test]
+    fn should_push_needs_sign_in_and_a_change() {
+        // 没登录：怎么变都不推
+        assert!(!should_push(1, 2, false));
+        // 内容没变：不推
+        assert!(!should_push(7, 7, true));
+        // 登录了、内容变了：推
+        assert!(should_push(7, 8, true));
+    }
+
+    #[test]
+    fn merge_handles_empty_and_keyless_rows() {
+        // 远端是空的：本地原样保留
+        let local = json!({ "entries": [{ "id": "a" }] });
+        let merged = merge_documents(&local, &json!({ "entries": [] }));
+        assert_eq!(merged["entries"].as_array().unwrap().len(), 1);
+
+        // 没有 id 的行不参与去重，两边都留着
+        let local = json!({ "entries": [{ "date": "2026-11-01" }] });
+        let remote = json!({ "entries": [{ "date": "2026-11-02" }] });
+        let merged = merge_documents(&local, &remote);
+        assert_eq!(merged["entries"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn ignore_lists_are_unioned_without_duplicates() {
+        let local = json!({ "ignoredDuplicates": ["a", "b"], "entries": [] });
+        let remote = json!({ "ignoredDuplicates": ["b", "c"], "entries": [] });
+        let merged = merge_documents(&local, &remote);
+        let list: Vec<&str> = merged["ignoredDuplicates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(list, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn wire_accounts_tolerate_missing_and_empty_bits() {
+        // 空数组进去，空数组出来
+        assert_eq!(to_wire_accounts(&json!([])).as_array().unwrap().len(), 0);
+        // 缺 entries 的账户不该把整批搞崩
+        let ruined = json!([{ "id": "a1", "name": "空账户" }]);
+        let wire = to_wire_accounts(&ruined);
+        assert_eq!(wire[0]["entries"], json!({}));
+        let back = from_wire_accounts(&wire);
+        assert_eq!(back.len(), 1);
+        assert!(back[0].entries.is_empty());
+    }
+
+    #[test]
+    fn empty_document_has_every_field_the_server_expects() {
+        let doc = empty_document();
+        assert!(doc["entries"].as_array().is_some());
+        assert!(doc["stocks"].as_array().is_some());
+        assert!(doc["stockAccounts"].as_array().is_some());
+        // 服务器 PUT 的时候会检查 entries 是数组，别让它 400
+        assert_eq!(summary(&doc)["entries"], json!(0));
+    }
+}
+
+/* ------------------------------ 上行的通道 ------------------------------ */
+
+use std::hash::{Hash, Hasher};
+
+/// 要不要推：登录了、并且内容和上次推上去的不一样。
+pub fn should_push(previous: u64, current: u64, signed_in: bool) -> bool {
+    signed_in && previous != current
+}
+
+/// 文档指纹：内容一样就算没变过，避免每两秒都往服务器推一遍。
+pub fn fingerprint(doc: &Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    doc.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+pub async fn fetch(app: &AppHandle) -> Result<Value, String> {
+    let token = token(app).ok_or("先登录再同步")?;
+    let base = server_base(app);
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/v1/ledger"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("连不上服务器：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("服务器没给账本（{}）", response.status().as_u16()));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("账本读不出来：{error}"))
+}
+
+async fn put(app: &AppHandle, base_rev: u64, doc: &Value) -> Result<(), String> {
+    let token = token(app).ok_or("先登录再同步")?;
+    let base = server_base(app);
+    let response = reqwest::Client::new()
+        .put(format!("{base}/api/v1/ledger"))
+        .bearer_auth(token)
+        .json(&json!({ "baseRev": base_rev, "ledger": doc }))
+        .timeout(std::time::Duration::from_secs(25))
+        .send()
+        .await
+        .map_err(|error| format!("推不上去：{error}"))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    if response.status().as_u16() == 409 {
+        return Err("conflict".into());
+    }
+    Err(format!("服务器拒收（{}）", response.status().as_u16()))
+}
+
+/// 把一份文档推上去。撞上别的设备改过（409）就拉下来合一次再推，
+/// 最多来回两轮——再纠缠下去说明两台机器在互相顶，交给下次改动。
+pub async fn push_document(app: &AppHandle, doc: Value) -> Result<Value, String> {
+    let mut current = doc;
+    for attempt in 0..2 {
+        let remote = fetch(app).await?;
+        let rev = remote.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        match put(app, rev, &current).await {
+            Ok(()) => return Ok(current),
+            Err(error) if error == "conflict" && attempt == 0 => {
+                if let Some(remote_doc) = remote.get("ledger").cloned().filter(|v| !v.is_null()) {
+                    current = merge_documents(&current, &remote_doc);
+                    apply_document(app, &current)?;
+                }
+            }
+            Err(error) if error == "conflict" => return Err("同步一直在打架，下次改动再试".into()),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(current)
+}
+
+/// 后台自动上行。
+///
+/// 每 2.5 秒看一眼本地文档有没有变：变了就推，没变什么都不做。没有去挂钩每一个
+/// 保存入口，是因为账本、自选股、CLI 三条路都能改数据，挂在保存点上总会漏一条；
+/// 盯住「最后推上去的那份内容」反而不会漏。
+///
+/// 启动时先把当前内容记成「已推过」，不然一开 App 就把本地覆盖到云端。
+pub fn start_autosync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut last = fingerprint(&local_document(&app));
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            if token(&app).is_none() {
+                // 退出登录后重新登录，应该以登录时的合并结果为准
+                last = fingerprint(&local_document(&app));
+                continue;
+            }
+            let doc = local_document(&app);
+            let current = fingerprint(&doc);
+            if !should_push(last, current, true) {
+                continue;
+            }
+            match push_document(&app, doc).await {
+                Ok(_) => {
+                    last = current;
+                    log::info!("[cloud] 本地改动已同步");
+                }
+                Err(error) => log::warn!("[cloud] 自动同步没成功：{error}"),
+            }
+        }
+    });
 }
