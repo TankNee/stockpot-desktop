@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod chart;
 pub mod cli;
+pub mod cloud;
 pub mod kline;
 pub mod ledger;
 pub mod market;
@@ -158,6 +159,106 @@ async fn account_logout(app: AppHandle) -> serde_json::Value {
 
 /// 一键清空：库里的文档、快照、令牌全删，内存里换回默认值。
 /// 自选股和账本一起没，所以前端必须二次确认。
+async fn fetch_cloud(app: &AppHandle) -> Result<serde_json::Value, String> {
+    let token = cloud::token(app).ok_or("先登录再同步")?;
+    let base = cloud::server_base(app);
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/v1/ledger"))
+        .bearer_auth(token)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("连不上服务器：{error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("服务器没给账本（{}）", response.status().as_u16()));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("账本读不出来：{error}"))
+}
+
+async fn push_cloud(app: &AppHandle, base_rev: u64, doc: &serde_json::Value) -> Result<(), String> {
+    let token = cloud::token(app).ok_or("先登录再同步")?;
+    let base = cloud::server_base(app);
+    let response = reqwest::Client::new()
+        .put(format!("{base}/api/v1/ledger"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "baseRev": base_rev, "ledger": doc }))
+        .timeout(std::time::Duration::from_secs(25))
+        .send()
+        .await
+        .map_err(|error| format!("推不上去：{error}"))?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    if response.status().as_u16() == 409 {
+        return Err("别的设备刚改过，再同步一次就好".into());
+    }
+    Err(format!("服务器拒收（{}）", response.status().as_u16()))
+}
+
+/// 同步前看一眼：云端有什么、本地有什么。登录之后前端拿它决定要不要问合并。
+#[tauri::command]
+async fn sync_preview(app: AppHandle) -> Result<serde_json::Value, String> {
+    let remote = fetch_cloud(&app).await?;
+    let remote_doc = remote.get("ledger").cloned().unwrap_or(serde_json::Value::Null);
+    let empty = remote_doc.is_null();
+    let local = cloud::local_document(&app);
+    Ok(serde_json::json!({
+        "remote": cloud::summary(&remote_doc),
+        "remoteEmpty": empty,
+        "remoteUpdatedAt": remote.get("updatedAt").cloned().unwrap_or(serde_json::Value::Null),
+        "local": cloud::summary(&local),
+        "localHasData": cloud::has_local_data(&app),
+    }))
+}
+
+/// 跑一次同步。
+///
+/// - `merge`：两边合成一份（本地打底，云端同 id 覆盖），再推回去
+/// - `remote`：直接用云端的覆盖本地，不推
+/// - `push`：把本地整份推上去
+#[tauri::command]
+async fn sync_run(app: AppHandle, mode: String) -> Result<serde_json::Value, String> {
+    let remote = fetch_cloud(&app).await?;
+    let base_rev = remote.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    let remote_doc = remote.get("ledger").cloned().filter(|v| !v.is_null());
+    let local_doc = cloud::local_document(&app);
+
+    let (target, applied) = match mode.as_str() {
+        "remote" => {
+            let doc = remote_doc.ok_or("云端还没有数据可以拉")?;
+            cloud::apply_document(&app, &doc)?;
+            (doc, "remote")
+        }
+        "push" => (local_doc.clone(), "push"),
+        _ => {
+            let merged = match remote_doc {
+                Some(doc) => cloud::merge_documents(&local_doc, &doc),
+                None => local_doc.clone(),
+            };
+            cloud::apply_document(&app, &merged)?;
+            (merged, "merge")
+        }
+    };
+
+    if applied != "remote" {
+        push_cloud(&app, base_rev, &target).await?;
+    }
+
+    let state = app.state::<AppState>();
+    let payload = state.payload();
+    broadcast(&app, &state);
+    // 账本窗口自己读文件，给它一个提示重新加载
+    let _ = app.emit("ledger-changed", serde_json::json!({}));
+
+    Ok(serde_json::json!({
+        "mode": applied,
+        "summary": cloud::summary(&target),
+    }))
+}
+
 #[tauri::command]
 async fn clear_storage(app: AppHandle) -> Result<serde_json::Value, String> {
     let state = app.state::<AppState>();
@@ -1847,6 +1948,8 @@ pub fn run() {
             account_register,
             account_logout,
             clear_storage,
+            sync_preview,
+            sync_run,
             check_update,
             install_update,
             refresh,

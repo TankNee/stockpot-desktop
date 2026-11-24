@@ -2716,6 +2716,10 @@ function AccountPanel() {
   const [name, setName] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
+  const [syncing, setSyncing] = React.useState(false);
+  const [syncNote, setSyncNote] = React.useState("");
+  // 两边都有数据时停下来问一句，别默默替人做决定
+  const [ask, setAsk] = React.useState<{ entries: number; stocks: number } | null>(null);
 
   React.useEffect(() => {
     if (!isTauri()) return;
@@ -2723,6 +2727,49 @@ function AccountPanel() {
       .then(setState)
       .catch(() => undefined);
   }, []);
+
+  async function runSync(mode: "merge" | "remote" | "push") {
+    setSyncing(true);
+    setAsk(null);
+    try {
+      const result = await call<{ summary: { entries: number; stocks: number } }>("sync_run", { mode });
+      const note = t("sync.done", {
+        entries: result.summary.entries,
+        stocks: result.summary.stocks,
+      });
+      setSyncNote(note);
+      pushToast(note);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setSyncNote(message);
+      pushToast(message);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  /** 登录后立刻看一眼云端：空就直接推，本地空就直接拉，两边都有才问。 */
+  async function afterLogin() {
+    try {
+      const preview = await call<{
+        remote: { entries: number; stocks: number };
+        remoteEmpty: boolean;
+        localHasData: boolean;
+      }>("sync_preview");
+      if (preview.remoteEmpty && !preview.localHasData) return;
+      if (preview.remoteEmpty) {
+        await runSync("push");
+        return;
+      }
+      if (!preview.localHasData) {
+        await runSync("remote");
+        return;
+      }
+      setAsk({ entries: preview.remote.entries, stocks: preview.remote.stocks });
+    } catch {
+      // 同步没走通不该挡住登录本身，静默算了
+    }
+  }
 
   async function submit() {
     if (busy) return;
@@ -2736,6 +2783,7 @@ function AccountPanel() {
       setState(next);
       setPassword("");
       pushToast(t("account.welcome", { name: next.name || next.email }));
+      void afterLogin();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2759,17 +2807,59 @@ function AccountPanel() {
   if (state?.signedIn) {
     return (
       <Section title={t("account.title")}>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-col gap-[2px]">
-            <span className="truncate text-[12.5px]">{state.name || state.email}</span>
-            <span className="truncate text-[11px] text-faint">{state.email}</span>
-            <span className="truncate text-[11px] text-faint">
-              {t("account.server", { server: state.server })}
-            </span>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-[2px]">
+              <span className="truncate text-[12.5px]">{state.name || state.email}</span>
+              <span className="truncate text-[11px] text-faint">{state.email}</span>
+              <span className="truncate text-[11px] text-faint">
+                {t("account.server", { server: state.server })}
+              </span>
+            </div>
+            <Button variant="outline" size="sm" className="shrink-0 text-[11.5px]" disabled={busy} onClick={() => void logout()}>
+              {t("account.logout")}
+            </Button>
           </div>
-          <Button variant="outline" size="sm" className="shrink-0 text-[11.5px]" disabled={busy} onClick={() => void logout()}>
-            {t("account.logout")}
-          </Button>
+
+          {/* 同步：账单、自选股、券商账户一起走 */}
+          <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
+            <span className="min-w-0 truncate text-[11px] text-faint" title={syncNote}>
+              {syncNote || t("sync.hint")}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="shrink-0 text-[11.5px]"
+              disabled={syncing}
+              onClick={() => void runSync("merge")}
+            >
+              {syncing ? t("sync.working") : t("sync.now")}
+            </Button>
+          </div>
+
+          {ask ? (
+            <div className="flex flex-col gap-1.5 rounded-[6px] border border-hairline bg-surface/60 px-2.5 py-2">
+              <span className="text-[11.5px]">
+                {t("sync.ask", { entries: ask.entries, stocks: ask.stocks })}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button variant="secondary" size="sm" className="text-[11.5px]" onClick={() => void runSync("merge")}>
+                  {t("sync.merge")}
+                </Button>
+                <Button variant="outline" size="sm" className="text-[11.5px]" onClick={() => void runSync("remote")}>
+                  {t("sync.useRemote")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-[11.5px] text-faint"
+                  onClick={() => setAsk(null)}
+                >
+                  {t("sync.later")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </Section>
     );
