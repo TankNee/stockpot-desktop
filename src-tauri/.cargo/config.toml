@@ -1,0 +1,26 @@
+# Stockpot — Windows developer environment.
+#
+# `ring` (pulled in by rustls for HTTPS) and other crates with a C build script
+# are compiled by MSVC `cl.exe`. On Windows the dev profile requests debug info
+# (`/Z7`), which makes `cl.exe` write PDB records through `c1.dll`; on some
+# toolchains that fails with
+#
+#     cl : Command line error D8050 : cannot execute "...\c1.dll"... 
+#
+# The compiler is fine — only the debug-record generation breaks. Dropping the
+# debug level for the dev profile keeps builds working while leaving the
+# release profile (which already has `strip = true`) untouched.
+#
+# If you need full debug info locally, run `cargo build` from a "x64 Native
+# Tools Command Prompt for VS 2022" instead, or set
+# `CARGO_PROFILE_DEV_DEBUG=2` after confirming your toolset handles `/Z7`.
+[build]
+# Keep artifacts inside the project on every platform.
+target-dir = "target"
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+# Dependencies never need debug info; this is where `ring` gets built.
+debug = false

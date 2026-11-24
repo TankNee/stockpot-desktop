@@ -1,0 +1,551 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Stockpot's palette is built from three materials: warm ledger paper, fountain
+  pen ink, and the two market colours. Nothing else is allowed to carry hue,
+  which keeps a dense readout calm.
+*/
+:root {
+  --paper: oklch(0.972 0.006 85);
+  --panel: oklch(0.978 0.005 85);
+  --surface: oklch(0.945 0.008 82);
+  --surface-strong: oklch(0.905 0.010 82);
+  --foreground: oklch(0.235 0.012 60);
+  --muted-foreground: oklch(0.523 0.010 65);
+  --faint: oklch(0.518 0.009 65);
+  --border: oklch(0.868 0.010 78);
+  --hairline: oklch(0.83 0.012 78);
+  --accent: oklch(0.47 0.075 245);
+  --accent-soft: oklch(0.947 0.016 245);
+  --accent-strong: oklch(0.39 0.08 245);
+  --red: oklch(0.529 0.176 28);
+  --green: oklch(0.492 0.103 156);
+  --amber: oklch(0.63 0.125 72);
+  --ring: oklch(0.47 0.075 245 / 85%);
+  --shadow: 0 18px 44px -18px oklch(0.2 0.02 60 / 35%), 0 2px 10px -4px oklch(0.2 0.02 60 / 18%);
+  --radius: 0.5rem;
+}
+
+.dark {
+  --paper: oklch(0.185 0.007 65);
+  --panel: oklch(0.208 0.008 65);
+  --surface: oklch(0.243 0.009 65);
+  --surface-strong: oklch(0.288 0.010 65);
+  --foreground: oklch(0.925 0.008 85);
+  --muted-foreground: oklch(0.705 0.010 80);
+  --faint: oklch(0.632 0.010 75);
+  --border: oklch(0.318 0.010 68);
+  --hairline: oklch(0.352 0.010 68);
+  --accent: oklch(0.755 0.078 235);
+  --accent-soft: oklch(0.286 0.028 240);
+  --accent-strong: oklch(0.84 0.07 235);
+  --red: oklch(0.685 0.155 28);
+  --green: oklch(0.72 0.108 158);
+  --amber: oklch(0.79 0.11 78);
+  --ring: oklch(0.755 0.078 235 / 75%);
+  --shadow: 0 22px 50px -20px oklch(0 0 0 / 70%), 0 2px 10px -4px oklch(0 0 0 / 45%);
+}
+
+/* Red-up / green-down (Chinese convention) is the default; the western
+   convention swaps their roles without touching the palette itself. */
+:root,
+:root[data-scheme="chinese"] {
+  --up: var(--red);
+  --down: var(--green);
+}
+:root[data-scheme="western"] {
+  --up: var(--green);
+  --down: var(--red);
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-surface: var(--surface);
+  --color-surface-strong: var(--surface-strong);
+  --color-background: var(--panel);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-hairline: var(--hairline);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-strong: var(--accent-strong);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-amber: var(--amber);
+  --color-ring: var(--ring);
+
+  --font-sans: "Instrument Sans Variable", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "PingFang SC", "Hiragino Sans GB", ui-monospace, monospace;
+  --font-serif: "Instrument Serif", "Songti SC", "Hiragino Mincho ProN", ui-serif, serif;
+
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    background: transparent;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    margin: 0;
+    background: transparent;
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.35;
+    font-feature-settings: "ss01" on, "cv01" on;
+    user-select: none;
+    overflow: hidden;
+  }
+
+  input,
+  textarea {
+    user-select: text;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--foreground);
+  }
+
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--ring);
+    border-radius: 4px;
+  }
+
+  /* Charts are pointer surfaces: a keyboard ring around the plot reads as a
+     stray black frame, so the SVG never paints one. */
+  .recharts-wrapper:focus,
+  .recharts-wrapper:focus-visible,
+  .recharts-surface:focus,
+  .recharts-surface:focus-visible {
+    outline: none;
+    box-shadow: none;
+  }
+
+  .recharts-clickable-datum path {
+    cursor: pointer;
+  }
+
+  button {
+    font: inherit;
+  }
+}
+
+@layer components {
+  /* The window is transparent; the shell paints the paper and leaves room for
+     the drop shadow that makes the panel read as a floating popover. */
+  .shell {
+    height: 100%;
+    padding: 10px;
+    background: transparent;
+  }
+
+  /* Windows cannot composite the rounded, transparent popover reliably, so
+     `tauri.windows.conf.json` creates the panel as an opaque window. Drop the
+     shadow gutter and let the panel fill the whole window instead. */
+  :root[data-platform="windows"] .shell {
+    padding: 0;
+  }
+
+  :root[data-platform="windows"] .panel {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+  }
+
+  .panel {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    isolation: isolate;
+  }
+
+  .panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    opacity: 0.035;
+    mix-blend-mode: multiply;
+    z-index: 0;
+  }
+
+  .dark .panel::before {
+    mix-blend-mode: screen;
+    opacity: 0.045;
+  }
+
+  .panel::after {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, oklch(1 0 0 / 40%), transparent);
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .dark .panel::after {
+    background: linear-gradient(90deg, transparent, oklch(1 0 0 / 8%), transparent);
+  }
+
+  .panel > * {
+    position: relative;
+    z-index: 2;
+  }
+
+  /* Tauri's built-in drag handler listens for [data-tauri-drag-region] and
+     starts a native window drag; CSS app-region no longer fires in WKWebView.
+     `deep` is not used so buttons inside the bar keep working. */
+  .drag-region {
+    cursor: default;
+  }
+
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  .eyebrow {
+    font-size: 9.5px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    font-weight: 560;
+  }
+
+  .ledger-rule {
+    background-image: linear-gradient(
+      90deg,
+      var(--hairline) 0 3px,
+      transparent 3px 6px
+    );
+    background-size: 6px 1px;
+    background-repeat: repeat-x;
+    height: 1px;
+  }
+
+  .scroll-area {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  .scroll-area:hover {
+    scrollbar-color: var(--hairline) transparent;
+  }
+
+  .scroll-area::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .scroll-area::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .scroll-area:hover::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    background-clip: padding-box;
+  }
+
+  .scroll-area::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* A brief tint behind the price only. Duration comes from the setting via
+     --tick-flash-ms so short/normal/long stay one keyframe each. */
+  .tick-flash-up {
+    animation: tick-up var(--tick-flash-ms, 620ms) cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+
+  .tick-flash-down {
+    animation: tick-down var(--tick-flash-ms, 620ms) cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+
+  @keyframes tick-up {
+    0% {
+      background-color: color-mix(in oklch, var(--up) 22%, transparent);
+    }
+    60% {
+      background-color: color-mix(in oklch, var(--up) 14%, transparent);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @keyframes tick-down {
+    0% {
+      background-color: color-mix(in oklch, var(--down) 22%, transparent);
+    }
+    60% {
+      background-color: color-mix(in oklch, var(--down) 14%, transparent);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.82);
+    }
+  }
+
+  .live-dot {
+    animation: pulse-dot 2.4s ease-in-out infinite;
+  }
+
+  /* Wide settings window: the same paper, no floating-panel shadow, so it
+     reads as a real app window rather than a detached popover. */
+  .window-shell {
+    height: 100%;
+    display: flex;
+    background: var(--panel);
+    overflow: hidden;
+    color: var(--foreground);
+  }
+
+  .sidebar-item {
+    position: relative;
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 8px;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    transition: background-color 140ms, color 140ms;
+  }
+
+  .sidebar-item:hover {
+    background: var(--surface);
+    color: var(--foreground);
+  }
+
+  /* The active row is a soft fill, the way a file tree marks selection. An
+     accent stripe down the edge was doing the same job twice, louder. */
+  .sidebar-item[data-active="true"] {
+    background: var(--accent-soft);
+    color: var(--foreground);
+    font-weight: 550;
+  }
+
+  /* Icon rail: fixed width, centred glyph, a taller row than the labelled
+     version so the hit target still reads as a button. */
+  .sidebar-rail .sidebar-item {
+    justify-content: center;
+    padding: 0;
+    height: 40px;
+    width: 100%;
+    border-radius: 8px;
+  }
+
+  /* Labels fade and collapse while the width animates; icons remain mounted,
+     so the rail transition never jumps from text to a new subtree. */
+  .sidebar-label {
+    min-width: 0;
+    overflow: hidden;
+    opacity: 1;
+    transition: opacity 150ms ease, transform 180ms ease;
+    transform-origin: left center;
+  }
+
+  /* Take the label out of the flex layout once it is collapsed; otherwise its
+     width/gap still shifts the icon even though the text is transparent. */
+  .sidebar-rail .sidebar-label.is-collapsed {
+    position: absolute;
+    width: 0;
+    max-width: 0;
+    opacity: 0;
+    transform: translateX(-4px);
+    pointer-events: none;
+  }
+
+  .sidebar-label.is-collapsed:not(.sidebar-rail *) {
+    opacity: 0;
+  }
+
+  .sidebar-item svg,
+  .sidebar-brand-icon {
+    transition: transform 180ms cubic-bezier(0.22, 0.8, 0.24, 1),
+      background-color 140ms;
+  }
+
+  .sidebar-rail .sidebar-item svg {
+    transform: scale(1.08);
+  }
+
+  .is-dragging .sidebar-label {
+    transition: opacity 120ms ease;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-label,
+    .sidebar-item svg,
+    .sidebar-brand-icon {
+      transition: none;
+    }
+  }
+
+  .cell-input {
+    width: 100%;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    padding: 0 6px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--foreground);
+    font-variant-numeric: tabular-nums;
+    transition: border-color 120ms, background-color 120ms;
+  }
+
+  .cell-input:hover {
+    border-color: var(--hairline);
+    background: var(--panel);
+  }
+
+  .cell-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--panel);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 14%, transparent);
+  }
+
+  .cell-input::placeholder {
+    color: var(--faint);
+    font-family: var(--font-sans);
+  }
+
+  /* ---- Windows caption buttons -------------------------------------------
+     The document windows are drawn without a native frame on Windows so the
+     buttons can match the app's own chrome. Metrics follow the Fluent
+     convention: 46×32 hit areas, flush with the top-right corner. */
+  .caption-buttons {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 70;
+    display: flex;
+    align-items: flex-start;
+    /* The window corners are square on Windows; nothing to inset for. */
+    -webkit-app-region: no-drag;
+  }
+
+  .caption-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 32px;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--muted-foreground);
+    transition: background-color 110ms ease, color 110ms ease;
+  }
+
+  .caption-btn:hover {
+    background: color-mix(in oklch, var(--foreground) 8%, transparent);
+    color: var(--foreground);
+  }
+
+  .caption-btn:active {
+    background: color-mix(in oklch, var(--foreground) 14%, transparent);
+  }
+
+  .caption-btn:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--ring);
+    border-radius: 0;
+  }
+
+  .caption-btn.is-close:hover {
+    background: #c42b1c;
+    color: #ffffff;
+  }
+
+  .caption-btn.is-close:active {
+    background: #b02a1b;
+    color: #ffffff;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+/* ---- Windows window overrides ---------------------------------------------
+   These deliberately sit outside every `@layer`. Tailwind puts its utilities in
+   a later cascade layer, so a rule inside `@layer components` would lose to
+   classes like `rounded-[12px]` or `px-5` no matter how specific its selector
+   is. Unlayered rules outrank layered ones, which is what a platform override
+   needs. */
+:root[data-platform="windows"] .window-shell {
+  /* A frameless window has no transparent surface to round, so the shell
+     squares off and leans on its 1px border instead. */
+  border-radius: 0;
+}
+
+:root[data-platform="windows"] .caption-inset {
+  /* The caption buttons live in a 32px strip at the very top, above this row.
+     Reserving their 138px width pushed every header control into the middle of
+     the window, so instead the row clears the strip vertically and runs to the
+     right edge like the content below it. */
+  padding-right: 1.25rem;
+  padding-top: 2.25rem;
+  height: auto;
+  min-height: 74px;
+}

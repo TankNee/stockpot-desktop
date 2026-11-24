@@ -1,0 +1,20 @@
+# 依赖与构建产物：src-tauri/target 是 Rust 的，十几 G，绝不能进仓库
+node_modules/
+.pnpm-store/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 签名和密码：storePassword / keyPassword 都在里面
+keystore.properties
+*.jks
+*.keystore
+
+# 本机杂项
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# 抓取或临时脚本产出的东西
+.tmp/

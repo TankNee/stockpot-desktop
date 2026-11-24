@@ -1,0 +1,43 @@
+[package]
+name = "stockpot"
+version = "1.0.3"
+description = "Stockpot — a quiet menu bar stock ticker for A-shares, Hong Kong, US and Korean markets"
+authors = ["Stockpot"]
+edition = "2024"
+
+[lib]
+name = "stockpot_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "charset", "http2"] }
+tokio = { version = "1", features = ["time", "sync", "macros", "rt-multi-thread"] }
+futures = "0.3"
+encoding_rs = "0.8"
+urlencoding = "2"
+chrono = "0.4"
+chrono-tz = "0.10"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+log = "0.4"
+calamine = "0.38.0"
+notify = "8.2.2"
+tauri-plugin-clipboard-manager = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
