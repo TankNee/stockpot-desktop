@@ -61,6 +61,12 @@ export interface Settings {
   menuBarPnlFormat: MenuBarPnlFormat;
   flashDuration: FlashDuration;
   pnlDisplay: PnlDisplay;
+  /** 更新从哪儿拿：自建服务器 server / GitHub release github */
+  updateSource: "server" | "github";
+  /** GitHub 源访问私有仓库时用的只读令牌，公开仓库留空 */
+  githubToken: string;
+  /** 自建同步服务器地址，空着用内置的 */
+  serverUrl: string;
 }
 
 export interface Quote {

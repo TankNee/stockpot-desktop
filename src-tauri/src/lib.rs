@@ -39,6 +39,250 @@ fn broadcast(app: &AppHandle, state: &AppState) {
     tray::set_title(app, &state.tray_label());
 }
 
+const DEFAULT_SERVER: &str = "https://api.stockpot.neeto.cn";
+
+fn server_base(app: &AppHandle) -> String {
+    let state = app.state::<AppState>();
+    let url = state.data.lock().unwrap().settings.server_url.clone();
+    let trimmed = url.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        DEFAULT_SERVER.to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn account_payload(app: &AppHandle) -> serde_json::Value {
+    let dir = crate::store::data_dir(app);
+    let token = crate::store::kv_get(&dir, "auth.token").unwrap_or_default();
+    serde_json::json!({
+        "signedIn": !token.is_empty(),
+        "email": crate::store::kv_get(&dir, "auth.email").unwrap_or_default(),
+        "name": crate::store::kv_get(&dir, "auth.name").unwrap_or_default(),
+        "server": server_base(app),
+    })
+}
+
+#[tauri::command]
+async fn account_state(app: AppHandle) -> serde_json::Value {
+    account_payload(&app)
+}
+
+async fn account_request(
+    app: &AppHandle,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let base = server_base(app);
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}{path}"))
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("连不上服务器：{error}"))?;
+    let status = response.status();
+    let value: serde_json::Value = response.json().await.unwrap_or_default();
+    if !status.is_success() {
+        let message = value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("服务器拒绝了这个请求");
+        return Err(message.to_string());
+    }
+    Ok(value)
+}
+
+fn store_session(app: &AppHandle, email: &str, value: &serde_json::Value) -> Result<(), String> {
+    let token = value.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    if token.is_empty() {
+        return Err("服务器没给令牌".into());
+    }
+    let dir = crate::store::data_dir(app);
+    let name = value
+        .get("user")
+        .and_then(|user| user.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    crate::store::kv_set(&dir, "auth.token", token).map_err(|e| e.to_string())?;
+    crate::store::kv_set(&dir, "auth.email", email).map_err(|e| e.to_string())?;
+    crate::store::kv_set(&dir, "auth.name", name).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn account_login(
+    app: AppHandle,
+    email: String,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    let value = account_request(
+        &app,
+        "/api/v1/auth/login",
+        serde_json::json!({ "email": email.trim(), "password": password }),
+    )
+    .await?;
+    if value.get("twoFactor").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("这个账号开了两步验证，先在手机 App 里登录一次".into());
+    }
+    store_session(&app, email.trim(), &value)?;
+    Ok(account_payload(&app))
+}
+
+#[tauri::command]
+async fn account_register(
+    app: AppHandle,
+    email: String,
+    password: String,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let value = account_request(
+        &app,
+        "/api/v1/auth/register",
+        serde_json::json!({ "email": email.trim(), "password": password, "name": name.trim() }),
+    )
+    .await?;
+    store_session(&app, email.trim(), &value)?;
+    Ok(account_payload(&app))
+}
+
+#[tauri::command]
+async fn account_logout(app: AppHandle) -> serde_json::Value {
+    let dir = crate::store::data_dir(&app);
+    let _ = crate::store::kv_remove(&dir, "auth.token");
+    let _ = crate::store::kv_remove(&dir, "auth.email");
+    let _ = crate::store::kv_remove(&dir, "auth.name");
+    account_payload(&app)
+}
+
+/// 一键清空：库里的文档、快照、令牌全删，内存里换回默认值。
+/// 自选股和账本一起没，所以前端必须二次确认。
+#[tauri::command]
+async fn clear_storage(app: AppHandle) -> Result<serde_json::Value, String> {
+    let state = app.state::<AppState>();
+    crate::store::clear_all(&state.dir).map_err(|e| e.to_string())?;
+    {
+        let mut data = state.data.lock().unwrap();
+        *data = AppData::default();
+    }
+    state.persist();
+    broadcast(&app, &state);
+    Ok(state.payload())
+}
+
+/// 检查更新。源在设置里选：自建服务器，或 GitHub release。
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let (source, token) = {
+        let state = app.state::<AppState>();
+        let data = state.data.lock().unwrap();
+        (
+            data.settings.update_source.clone(),
+            data.settings.github_token.clone(),
+        )
+    };
+
+    let endpoint = if source == "github" {
+        "https://github.com/TankNee/stockpot-desktop/releases/latest/download/latest.json".to_string()
+    } else {
+        format!(
+            "{}/api/v1/app/updates/{{{{target}}}}/{{{{arch}}}}/{{{{current_version}}}}",
+            server_base(&app)
+        )
+    };
+
+    let url = endpoint
+        .parse::<tauri::Url>()
+        .map_err(|error| format!("更新地址不对：{error}"))?;
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|error| format!("更新器没起来：{error}"))?;
+    if source == "github" && !token.trim().is_empty() {
+        builder = builder
+            .header("Authorization", format!("Bearer {}", token.trim()))
+            .map_err(|error| format!("加不上令牌：{error}"))?;
+    }
+    let updater = builder.build().map_err(|error| format!("更新器没起来：{error}"))?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("检查失败：{error}"))?;
+
+    match update {
+        Some(item) => Ok(serde_json::json!({
+            "available": true,
+            "version": item.version,
+            "currentVersion": item.current_version,
+            "notes": item.body.clone().unwrap_or_default(),
+            "source": source,
+        })),
+        None => Ok(serde_json::json!({ "available": false, "source": source })),
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let (source, token) = {
+        let state = app.state::<AppState>();
+        let data = state.data.lock().unwrap();
+        (
+            data.settings.update_source.clone(),
+            data.settings.github_token.clone(),
+        )
+    };
+    let endpoint = if source == "github" {
+        "https://github.com/TankNee/stockpot-desktop/releases/latest/download/latest.json".to_string()
+    } else {
+        format!(
+            "{}/api/v1/app/updates/{{{{target}}}}/{{{{arch}}}}/{{{{current_version}}}}",
+            server_base(&app)
+        )
+    };
+    let url = endpoint
+        .parse::<tauri::Url>()
+        .map_err(|error| format!("更新地址不对：{error}"))?;
+    let mut builder = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|error| format!("更新器没起来：{error}"))?;
+    if source == "github" && !token.trim().is_empty() {
+        builder = builder
+            .header("Authorization", format!("Bearer {}", token.trim()))
+            .map_err(|error| format!("加不上令牌：{error}"))?;
+    }
+    let updater = builder.build().map_err(|error| format!("更新器没起来：{error}"))?;
+
+    let Some(update) = updater
+        .check()
+        .await
+        .map_err(|error| format!("检查失败：{error}"))?
+    else {
+        return Ok(false);
+    };
+
+    let handle = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                let _ = handle.emit(
+                    "update-progress",
+                    serde_json::json!({ "chunk": chunk, "total": total }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| format!("安装失败：{error}"))?;
+    Ok(true)
+}
+
 #[tauri::command]
 async fn get_app(app: AppHandle) -> serde_json::Value {
     let payload = with_state(&app, |s| s.payload());
@@ -576,6 +820,21 @@ fn apply_settings_patch(settings: &mut Settings, patch: &serde_json::Value) {
             "showDockIcon" => {
                 if let Some(v) = value.as_bool() {
                     settings.show_dock_icon = v;
+                }
+            }
+            "updateSource" => {
+                if let Some(v) = value.as_str() {
+                    settings.update_source = v.to_string();
+                }
+            }
+            "githubToken" => {
+                if let Some(v) = value.as_str() {
+                    settings.github_token = v.trim().to_string();
+                }
+            }
+            "serverUrl" => {
+                if let Some(v) = value.as_str() {
+                    settings.server_url = v.trim().to_string();
                 }
             }
             _ => {}
@@ -1583,6 +1842,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app,
+            account_state,
+            account_login,
+            account_register,
+            account_logout,
+            clear_storage,
+            check_update,
+            install_update,
             refresh,
             search,
             add_stock,

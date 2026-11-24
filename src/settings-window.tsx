@@ -2692,38 +2692,182 @@ function ReclassifyReview({
   );
 }
 
+const isTauri = () => "__TAURI_INTERNALS__" in window;
+
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(cmd, args);
+}
+
+type AccountState = { signedIn: boolean; email: string; name: string; server: string };
+
 /**
- * 更新一块：点一下问自己的服务器，有新版就下载并交给安装器。
+ * 账号：登录之后才知道是谁在同步。令牌存在本地库里，退出就删干净。
  *
- * 不打自动检查——一个菜单栏小组件偷偷重启自己很烦。用户点的时候才查，
- * 进度和结果都写在这一行里，不弹窗。
+ * 不登录也能用——这个应用本来就是个本地行情工具，账号只关系到「换一台机器
+ * 还能把自选股带过去」。
  */
-function UpdateBlock() {
-  const { t } = useStore();
+function AccountPanel() {
+  const { t, pushToast } = useStore();
+  const [state, setState] = React.useState<AccountState | null>(null);
+  const [mode, setMode] = React.useState<"login" | "register">("login");
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [name, setName] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    if (!isTauri()) return;
+    void call<AccountState>("account_state")
+      .then(setState)
+      .catch(() => undefined);
+  }, []);
+
+  async function submit() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next =
+        mode === "login"
+          ? await call<AccountState>("account_login", { email, password })
+          : await call<AccountState>("account_register", { email, password, name });
+      setState(next);
+      setPassword("");
+      pushToast(t("account.welcome", { name: next.name || next.email }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    setBusy(true);
+    try {
+      const next = await call<AccountState>("account_logout");
+      setState(next);
+      pushToast(t("account.signedOut"));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state?.signedIn) {
+    return (
+      <Section title={t("account.title")}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col gap-[2px]">
+            <span className="truncate text-[12.5px]">{state.name || state.email}</span>
+            <span className="truncate text-[11px] text-faint">{state.email}</span>
+            <span className="truncate text-[11px] text-faint">
+              {t("account.server", { server: state.server })}
+            </span>
+          </div>
+          <Button variant="outline" size="sm" className="shrink-0 text-[11.5px]" disabled={busy} onClick={() => void logout()}>
+            {t("account.logout")}
+          </Button>
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={t("account.title")}>
+      <div className="flex flex-col gap-2">
+        <p className="text-[11px] leading-relaxed text-faint">
+          {mode === "login" ? t("account.hintLogin") : t("account.hintRegister")}
+        </p>
+        {mode === "register" ? (
+          <input
+            className="w-full rounded-[6px] border border-hairline bg-panel px-2 py-1.5 text-[12px] outline-none"
+            placeholder={t("account.name")}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        ) : null}
+        <input
+          className="w-full rounded-[6px] border border-hairline bg-panel px-2 py-1.5 text-[12px] outline-none"
+          placeholder={t("account.email")}
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <input
+          className="w-full rounded-[6px] border border-hairline bg-panel px-2 py-1.5 text-[12px] outline-none"
+          type="password"
+          placeholder={t("account.password")}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void submit();
+          }}
+        />
+        {error ? <span className="text-[11px] text-down">{error}</span> : null}
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" className="text-[11.5px]" disabled={busy} onClick={() => void submit()}>
+            {busy ? t("account.working") : mode === "login" ? t("account.login") : t("account.register")}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-[11.5px] text-faint"
+            onClick={() => {
+              setError("");
+              setMode(mode === "login" ? "register" : "login");
+            }}
+          >
+            {mode === "login" ? t("account.toRegister") : t("account.toLogin")}
+          </Button>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/**
+ * 一块更新：先选源，再点检查。
+ *
+ * macOS 默认走 GitHub（自建服务器拉不到 GitHub 的包，但客户端能直连），
+ * Windows 默认走自己的服务器。两边都留了切换，谁的网络更顺就用哪边。
+ */
+function UpdatePanel() {
+  const { t, settings, updateSettings } = useStore();
   const [status, setStatus] = React.useState<
     "idle" | "checking" | "latest" | "found" | "downloading" | "failed"
   >("idle");
   const [found, setFound] = React.useState("");
   const [progress, setProgress] = React.useState(0);
   const [error, setError] = React.useState("");
-  const updateRef = React.useRef<{ downloadAndInstall: (cb: (e: unknown) => void) => Promise<void> } | null>(null);
+
+  const source = settings?.updateSource ?? (navigator.platform.includes("Mac") ? "github" : "server");
+
+  React.useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ chunk: number; total: number | null }>("update-progress", (event) => {
+        const { chunk, total } = event.payload;
+        if (total && total > 0) setProgress(Math.min(1, chunk / total));
+      });
+    })();
+    return () => unlisten?.();
+  }, []);
 
   async function checkNow() {
-    if (!("__TAURI_INTERNALS__" in window)) return;
     setStatus("checking");
     setError("");
     try {
-      const mod = await import("@tauri-apps/plugin-updater");
-      const update = await mod.check();
-      if (!update) {
+      const result = await call<{ available: boolean; version?: string }>("check_update");
+      if (result.available && result.version) {
+        setFound(result.version);
+        setStatus("found");
+      } else {
         setStatus("latest");
-        return;
       }
-      updateRef.current = update as unknown as {
-        downloadAndInstall: (cb: (e: unknown) => void) => Promise<void>;
-      };
-      setFound(update.version);
-      setStatus("found");
     } catch (e) {
       setStatus("failed");
       setError(e instanceof Error ? e.message : String(e));
@@ -2731,22 +2875,12 @@ function UpdateBlock() {
   }
 
   async function installNow() {
-    const update = updateRef.current;
-    if (!update) return;
     setStatus("downloading");
     setProgress(0);
-    let total = 0;
-    let size = 0;
     try {
-      await update.downloadAndInstall((event: unknown) => {
-        const payload = event as { event?: string; data?: { contentLength?: number; chunkLength?: number } };
-        if (payload.event === "Started") {
-          size = payload.data?.contentLength ?? 0;
-        } else if (payload.event === "Progress") {
-          total += payload.data?.chunkLength ?? 0;
-          if (size > 0) setProgress(Math.min(1, total / size));
-        }
-      });
+      await call<boolean>("install_update");
+      // 装完应用会自己重启，走到这儿一般是没找到更新
+      setStatus("latest");
     } catch (e) {
       setStatus("failed");
       setError(e instanceof Error ? e.message : String(e));
@@ -2766,42 +2900,120 @@ function UpdateBlock() {
       case "failed":
         return t("update.failed", { error });
       default:
-        return t("update.hint");
+        return source === "github" ? t("update.hintGithub") : t("update.hintServer");
     }
   })();
 
   const busy = status === "checking" || status === "downloading";
 
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
-      <div className="flex min-w-0 flex-col gap-[1px]">
-        <span className="text-[12.5px]">{t("update.title")}</span>
-        <span className={cn("truncate text-[11px]", status === "failed" ? "text-down" : "text-faint")} title={hint}>
-          {hint}
-        </span>
+    <Section title={t("update.title")}>
+      <div className="flex flex-col gap-2">
+        <Segmented<"server" | "github">
+          ariaLabel={t("update.source")}
+          value={source}
+          onChange={(value) => {
+            setStatus("idle");
+            void updateSettings({ updateSource: value as "server" | "github" });
+          }}
+          options={[
+            { value: "server", label: t("update.sourceServer") },
+            { value: "github", label: t("update.sourceGithub") },
+          ]}
+        />
+        {source === "github" ? (
+          <input
+            className="w-full rounded-[6px] border border-hairline bg-panel px-2 py-1.5 text-[12px] outline-none"
+            placeholder={t("update.tokenHint")}
+            value={settings?.githubToken ?? ""}
+            onChange={(e) => void updateSettings({ githubToken: e.target.value })}
+          />
+        ) : null}
+        <div className="flex items-center justify-between gap-3">
+          <span
+            className={cn("min-w-0 truncate text-[11px]", status === "failed" ? "text-down" : "text-faint")}
+            title={hint}
+          >
+            {hint}
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="shrink-0 text-[11.5px]"
+            disabled={busy}
+            onClick={() => void (status === "found" ? installNow() : checkNow())}
+          >
+            {status === "downloading"
+              ? t("update.downloading", { pct: Math.round(progress * 100) })
+              : status === "found"
+                ? t("update.install")
+                : t("update.check")}
+          </Button>
+        </div>
       </div>
-      <Button
-        variant="secondary"
-        size="sm"
-        className="shrink-0 text-[11.5px]"
-        disabled={busy}
-        onClick={() => void (status === "found" ? installNow() : checkNow())}
-      >
-        {status === "downloading"
-          ? t("update.downloading", { pct: Math.round(progress * 100) })
-          : status === "found"
-            ? t("update.install")
-            : t("update.check")}
-      </Button>
-    </div>
+    </Section>
+  );
+}
+
+/** 存储：路径 + 一键清空。清空是不可逆的，所以要按两下。 */
+function StoragePanel() {
+  const { t, dataFile, openDataDir, pushToast } = useStore();
+  const [armed, setArmed] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+
+  async function clearAll() {
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setBusy(true);
+    try {
+      await call("clear_storage");
+      pushToast(t("storage.cleared"));
+      // 设置、自选、账本都回到出厂状态，直接重载最干净
+      setTimeout(() => window.location.reload(), 600);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+      setArmed(false);
+    }
+  }
+
+  return (
+    <Section title={t("storage.title")}>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <code className="num flex-1 truncate rounded-[5px] border border-hairline bg-surface/60 px-2 py-1.5 text-[11px] text-muted-foreground">
+            {dataFile}
+          </code>
+          <Button variant="secondary" size="sm" className="text-[11.5px]" onClick={openDataDir}>
+            <FolderOpen size={10} strokeWidth={2.2} />
+            {t("settings.openDataDir")}
+          </Button>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-2">
+          <span className="text-[11px] leading-relaxed text-faint">
+            {armed ? t("storage.confirm") : t("storage.hint")}
+          </span>
+          <Button
+            variant={armed ? "danger" : "outline"}
+            size="sm"
+            className="shrink-0 text-[11.5px]"
+            disabled={busy}
+            onClick={() => void clearAll()}
+            onMouseLeave={() => setArmed(false)}
+          >
+            {busy ? t("storage.working") : armed ? t("storage.confirmAction") : t("storage.clear")}
+          </Button>
+        </div>
+      </div>
+    </Section>
   );
 }
 
 function AboutTab() {
   const {
     t,
-    dataFile,
-    openDataDir,
     notifyGranted,
     notifyChecked,
     requestNotifications,
@@ -2822,6 +3034,8 @@ function AboutTab() {
 
   return (
     <div className="flex flex-col gap-5">
+      <AccountPanel />
+
       <Section title={t("settings.alerts")}>
         <div className="flex items-center justify-between gap-3 rounded-[6px] border border-hairline bg-panel px-2.5 py-2">
           <div className="flex items-center gap-2">
@@ -2873,23 +3087,9 @@ function AboutTab() {
         </div>
       </Section>
 
-      <Section title={t("settings.dataFile")}>
-        <div className="flex items-center gap-2">
-          <code className="num flex-1 truncate rounded-[5px] border border-hairline bg-surface/60 px-2 py-1.5 text-[11px] text-muted-foreground">
-            {dataFile}
-          </code>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="text-[11.5px]"
-            onClick={openDataDir}
-          >
-            <FolderOpen size={10} strokeWidth={2.2} />
-            {t("settings.openDataDir")}
-          </Button>
-        </div>
-        <p className="text-[11px] leading-relaxed text-faint">{t("about.backupHint")}</p>
-      </Section>
+      <StoragePanel />
+
+      <UpdatePanel />
 
       <Section title={t("settings.about")}>
         <div className="flex flex-col gap-2">
@@ -2899,7 +3099,6 @@ function AboutTab() {
               {t("settings.version", { version })}
             </span>
           </div>
-          <UpdateBlock />
           <p className="text-[11px] leading-relaxed text-faint">{t("about.sources")}</p>
           <p className="text-[11px] leading-relaxed text-faint">{t("about.disclaimer")}</p>
           <div className="flex items-center gap-3 border-t border-border/60 pt-2 text-[11px] text-faint">

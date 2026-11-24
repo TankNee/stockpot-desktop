@@ -1,6 +1,6 @@
 [package]
 name = "stockpot"
-version = "1.0.4"
+version = "1.0.5"
 description = "Stockpot — a quiet menu bar stock ticker for A-shares, Hong Kong, US and Korean markets"
 authors = ["Stockpot"]
 edition = "2024"
@@ -27,6 +27,7 @@ encoding_rs = "0.8"
 urlencoding = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
 log = "0.4"

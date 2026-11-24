@@ -1,14 +1,21 @@
 use crate::model::AppData;
+use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Stockpot keeps its data as a single human-readable JSON document plus a
-/// rolling set of backups. Everything lives under the platform's per-user
-/// application data folder:
+/// Stockpot 的数据落在一个 SQLite 库里，路径跟以前一样在每用户的应用目录下：
 ///
-/// - macOS: `~/Library/Application Support/com.stockpot.app/`
-/// - Windows: `%APPDATA%\com.stockpot.app\`
-/// - Linux: `~/.local/share/com.stockpot.app/`
+/// - macOS: `~/Library/Application Support/com.stockpot.app/stockpot.db`
+/// - Windows: `%APPDATA%\com.stockpot.app\stockpot.db`
+/// - Linux: `~/.local/share/com.stockpot.app/stockpot.db`
+///
+/// 表只有三张：`app_document` 存当前这份文档（一行 JSON，读进内存后照旧用
+/// `AppData` 那个结构），`document_history` 留最近五份快照顶替以前的滚动备份，
+/// `kv` 放账号令牌这类零碎。
+///
+/// 为什么不拆成「股票一张表、账户一张表」：这份文档只有几十 KB，读写都在内存里
+/// 完成，拆表除了多几百行映射代码没有别的好处。换成 SQLite 要的是原子写入和
+/// 一个不会因为半截写入就整个读不出来的文件。
 pub fn data_dir(app: &tauri::AppHandle) -> PathBuf {
     use tauri::Manager;
     // An explicit override keeps test runs and portable installs out of the real
@@ -23,12 +30,52 @@ pub fn data_dir(app: &tauri::AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+pub fn db_path(dir: &Path) -> PathBuf {
+    dir.join("stockpot.db")
+}
+
+/// 设置页显示的那个路径：现在是库文件，不再是那份 JSON。
 pub fn data_path(app: &tauri::AppHandle) -> PathBuf {
-    data_dir(app).join("stockpot.json")
+    db_path(&data_dir(app))
 }
 
 pub fn ensure_dir(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir)
+}
+
+fn open_db(dir: &Path) -> std::io::Result<Connection> {
+    ensure_dir(dir)?;
+    let conn = Connection::open(db_path(dir)).map_err(io_err)?;
+    conn.pragma_update(None, "journal_mode", "WAL").map_err(io_err)?;
+    conn.pragma_update(None, "synchronous", "NORMAL").map_err(io_err)?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))
+        .map_err(io_err)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_document (
+             id TEXT PRIMARY KEY,
+             json TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS document_history (
+             seq INTEGER PRIMARY KEY AUTOINCREMENT,
+             json TEXT NOT NULL,
+             at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS kv (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL
+         );",
+    )
+    .map_err(io_err)?;
+    Ok(conn)
+}
+
+fn io_err(error: rusqlite::Error) -> std::io::Error {
+    std::io::Error::other(error)
+}
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 pub fn read_data_file(dir: &Path) -> AppData {
@@ -38,25 +85,26 @@ pub fn read_data_file(dir: &Path) -> AppData {
 /// Same as [`read_data_file`], but also reports whether the on-disk document
 /// was in an older shape and should be rewritten straight away.
 pub fn read_data_file_with_status(dir: &Path) -> (AppData, bool) {
-    let path = dir.join("stockpot.json");
-    match fs::read_to_string(&path) {
-        Ok(raw) => {
-            let before = serde_json::from_str::<AppData>(&raw).ok();
-            let upgraded = before
-                .as_ref()
-                .map(|d| d.accounts.is_empty())
-                .unwrap_or(true);
-            let mut data = load_and_migrate(&raw, dir);
-            crate::model::migrate(&mut data, &serde_json::Value::Null);
-            (data, upgraded)
-        }
-        Err(_) => (AppData::default(), false),
+    // 1) 新格式：库里有文档就直接用
+    if let Some(raw) = read_document(dir) {
+        return (decode(&raw, dir), false);
     }
+
+    // 2) 老版本留下的 stockpot.json：读进来写进库，原文件改名留个档，
+    //    不删——万一迁移逻辑有漏，人还能手动找回原来的东西
+    let legacy = dir.join("stockpot.json");
+    if let Ok(raw) = fs::read_to_string(&legacy) {
+        let data = decode(&raw, dir);
+        let _ = write_data_file(dir, &data);
+        let _ = fs::rename(&legacy, dir.join("stockpot.json.migrated"));
+        log::info!("已把 stockpot.json 迁移进 SQLite");
+        return (data, true);
+    }
+
+    (AppData::default(), false)
 }
 
-/// Parse, then fold older file shapes into the current one. Returns a default
-/// document only when every candidate (live file, then backups) is unusable.
-fn load_and_migrate(raw: &str, dir: &Path) -> AppData {
+fn decode(raw: &str, dir: &Path) -> AppData {
     match serde_json::from_str::<AppData>(raw) {
         Ok(mut data) => {
             let value: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
@@ -64,52 +112,100 @@ fn load_and_migrate(raw: &str, dir: &Path) -> AppData {
             data
         }
         Err(err) => {
-            log::warn!("stockpot.json is malformed ({err}); trying backups");
-            let mut recovered = read_latest_backup(dir).unwrap_or_default();
+            log::warn!("库里的文档坏了（{err}），试一下快照");
+            let mut recovered = read_latest_snapshot(dir).unwrap_or_default();
             crate::model::migrate(&mut recovered, &serde_json::Value::Null);
             recovered
         }
     }
 }
 
-fn read_latest_backup(dir: &Path) -> Option<AppData> {
-    for i in 1..=10 {
-        let p = dir.join(format!("stockpot.{i}.json"));
-        if let Ok(raw) = fs::read_to_string(&p)
-            && let Ok(data) = serde_json::from_str::<AppData>(&raw)
-        {
-            return Some(data);
-        }
-    }
-    None
+fn read_document(dir: &Path) -> Option<String> {
+    let conn = open_db(dir).ok()?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT json FROM app_document WHERE id = 'current'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    raw
 }
 
-/// Rotate stockpot.1..10 before overwriting the live file. Keeps up to ten
-/// snapshots so a bad edit or crashed write never destroys the watchlist.
-fn rotate_backups(dir: &Path) {
-    let live = dir.join("stockpot.json");
-    if !live.exists() {
-        return;
-    }
-    for i in (1..10).rev() {
-        let from = dir.join(format!("stockpot.{i}.json"));
-        let to = dir.join(format!("stockpot.{}.json", i + 1));
-        if from.exists() {
-            let _ = fs::remove_file(&to);
-            let _ = fs::rename(&from, &to);
-        }
-    }
-    let _ = fs::remove_file(dir.join("stockpot.1.json"));
-    let _ = fs::copy(&live, dir.join("stockpot.1.json"));
+fn read_latest_snapshot(dir: &Path) -> Option<AppData> {
+    let conn = open_db(dir).ok()?;
+    let mut stmt = conn
+        .prepare("SELECT json FROM document_history ORDER BY seq DESC LIMIT 1")
+        .ok()?;
+    let raw: Option<String> = stmt.query_row([], |row| row.get(0)).ok();
+    raw.and_then(|text| serde_json::from_str::<AppData>(&text).ok())
 }
 
 pub fn write_data_file(dir: &Path, data: &AppData) -> std::io::Result<()> {
-    ensure_dir(dir)?;
-    rotate_backups(dir);
-    let json = serde_json::to_vec_pretty(data)?;
-    let tmp = dir.join("stockpot.json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(tmp, dir.join("stockpot.json"))?;
+    let json = serde_json::to_string(data)?;
+    let at = now();
+    let mut conn = open_db(dir)?;
+    let tx = conn.transaction().map_err(io_err)?;
+    // 旧的那份先躺进历史表，只留最近五条——够救命，不至于把库撑大
+    tx.execute(
+        "INSERT INTO document_history (json, at)
+         SELECT json, updated_at FROM app_document WHERE id = 'current'",
+        [],
+    )
+    .map_err(io_err)?;
+    tx.execute(
+        "DELETE FROM document_history
+         WHERE seq NOT IN (SELECT seq FROM document_history ORDER BY seq DESC LIMIT 5)",
+        [],
+    )
+    .map_err(io_err)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO app_document (id, json, updated_at) VALUES ('current', ?1, ?2)",
+        params![json, at],
+    )
+    .map_err(io_err)?;
+    tx.commit().map_err(io_err)?;
+    Ok(())
+}
+
+/// 一键清空：文档、快照、令牌全删，表留着。调用方负责把内存里的状态也重置。
+pub fn clear_all(dir: &Path) -> std::io::Result<()> {
+    let conn = open_db(dir)?;
+    conn.execute_batch(
+        "DELETE FROM app_document;
+         DELETE FROM document_history;
+         DELETE FROM kv;",
+    )
+    .map_err(io_err)?;
+    // WAL 里可能还留着旧页，清完顺手收缩一下
+    let _ = conn.execute_batch("VACUUM;");
+    Ok(())
+}
+
+/* ------------------------------- 零碎键值 ------------------------------- */
+
+pub fn kv_set(dir: &Path, key: &str, value: &str) -> std::io::Result<()> {
+    let conn = open_db(dir)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(io_err)?;
+    Ok(())
+}
+
+pub fn kv_get(dir: &Path, key: &str) -> Option<String> {
+    let conn = open_db(dir).ok()?;
+    conn.query_row("SELECT value FROM kv WHERE key = ?1", params![key], |row| {
+        row.get(0)
+    })
+    .ok()
+}
+
+pub fn kv_remove(dir: &Path, key: &str) -> std::io::Result<()> {
+    let conn = open_db(dir)?;
+    conn.execute("DELETE FROM kv WHERE key = ?1", params![key])
+        .map_err(io_err)?;
     Ok(())
 }
 
@@ -124,9 +220,7 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn round_trips_and_rotates_backups() {
-        let dir = temp_dir("roundtrip");
+    fn sample() -> AppData {
         let mut data = AppData::default();
         data.stocks.push(Stock {
             id: "sh600000".into(),
@@ -138,31 +232,63 @@ mod tests {
             legacy_cost_price: Some(9.5),
             legacy_shares: Some(100.0),
         });
+        data
+    }
+
+    #[test]
+    fn round_trips_through_sqlite() {
+        let dir = temp_dir("roundtrip");
+        let data = sample();
         write_data_file(&dir, &data).unwrap();
-        assert!(dir.join("stockpot.json").exists());
+        assert!(db_path(&dir).exists());
         let loaded = read_data_file(&dir);
         assert_eq!(loaded.stocks.len(), 1);
         assert_eq!(loaded.stocks[0].name, "浦发银行");
-
-        // A second write rotates the previous document into stockpot.1.json.
-        data.accounts.push(crate::model::Account::new("Broker"));
-        write_data_file(&dir, &data).unwrap();
-        assert!(dir.join("stockpot.1.json").exists());
-        let backup = fs::read_to_string(dir.join("stockpot.1.json")).unwrap();
-        assert!(backup.contains("100.0"));
-
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn recovers_from_corrupt_document() {
-        let dir = temp_dir("corrupt");
-        write_data_file(&dir, &AppData::default()).unwrap();
-        write_data_file(&dir, &AppData::default()).unwrap();
-        fs::write(dir.join("stockpot.json"), "{not json").unwrap();
-        // Falls back to the backup rather than exploding.
-        let loaded = read_data_file(&dir);
-        assert!(loaded.stocks.is_empty());
+    fn keeps_a_few_snapshots() {
+        let dir = temp_dir("snapshots");
+        for i in 0..8 {
+            let mut data = sample();
+            data.stocks[0].name = format!("版本{i}");
+            write_data_file(&dir, &data).unwrap();
+        }
+        // 连接用完立刻放掉：Windows 上文件还被占着时删目录会失败
+        let count: i64 = {
+            let conn = open_db(&dir).unwrap();
+            conn.query_row("SELECT COUNT(*) FROM document_history", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(count, 5);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_json_once() {
+        let dir = temp_dir("legacy");
+        let raw = serde_json::to_string(&sample()).unwrap();
+        fs::write(dir.join("stockpot.json"), raw).unwrap();
+
+        let (data, upgraded) = read_data_file_with_status(&dir);
+        assert_eq!(data.stocks.len(), 1);
+        assert!(upgraded);
+        assert!(dir.join("stockpot.json.migrated").exists());
+        // 第二次读就从库里来，不会重复迁移
+        let again = read_data_file(&dir);
+        assert_eq!(again.stocks.len(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn clears_everything() {
+        let dir = temp_dir("clear");
+        write_data_file(&dir, &sample()).unwrap();
+        kv_set(&dir, "token", "abc").unwrap();
+        clear_all(&dir).unwrap();
+        assert!(read_data_file(&dir).stocks.is_empty());
+        assert!(kv_get(&dir, "token").is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

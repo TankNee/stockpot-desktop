@@ -309,6 +309,16 @@ pub struct Settings {
     pub flash_duration: String,
     /// List density: show P&L as amounts, or percentages only.
     pub pnl_display: String,
+    /// 更新从哪儿拿：server（自建）/ github（release）。
+    /// 默认 macOS 走 github——这台服务器拉不到 GitHub 的包，但 macOS 客户端能直连。
+    #[serde(default = "default_update_source")]
+    pub update_source: String,
+    /// GitHub 更新源要访问私有仓库时填一个只读令牌，公开仓库留空即可。
+    #[serde(default)]
+    pub github_token: String,
+    /// 自建同步服务器的地址，空了就用内置的。
+    #[serde(default)]
+    pub server_url: String,
     /// Ollama JEV endpoint for AI classification, e.g.
     /// `http://localhost:11434/v1`. Empty means the feature is off.
     #[serde(default)]
@@ -350,7 +360,18 @@ impl Default for Settings {
             ai_model: "tev1:4b".into(),
             ai_api_key: String::new(),
             ai_batch_size: 12,
+            update_source: default_update_source(),
+            github_token: String::new(),
+            server_url: String::new(),
         }
+    }
+}
+
+fn default_update_source() -> String {
+    if cfg!(target_os = "macos") {
+        "github".to_string()
+    } else {
+        "server".to_string()
     }
 }
 

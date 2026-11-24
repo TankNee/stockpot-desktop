@@ -71,6 +71,9 @@ const demoData: AppPayload = {
       menuBarPnlFormat: "amount",
       flashDuration: "normal",
       pnlDisplay: "amount",
+      updateSource: "server",
+      githubToken: "",
+      serverUrl: "",
     },
     // Two brokers holding the same names at different costs, which is the case
     // the merged row has to get right.
