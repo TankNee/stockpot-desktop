@@ -54,6 +54,40 @@ function Initialize-Msvc {
     if (-not $env:VCToolsVersion) { throw "Failed to initialise the MSVC environment from vcvars64.bat." }
 }
 
+function Complete-WindowsSdk {
+    # vcvars64.bat 查 SDK 路径靠的是 reg.exe 读注册表。如果调用方（比如沙箱里的 agent）
+    # 把 reg.exe 拦了，vcvars 不会报错，只是 INCLUDE/LIB 里少了 Windows Kits 那几条，
+    # 于是第一次碰到 #include <windows.h> 才炸，报的还是 cl 的 exit code 2、没有别的线索。
+    # 这里按目录自己补上，正常环境走不到。
+    if ($env:INCLUDE -like '*Windows Kits*') { return }
+
+    $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+    if (-not (Test-Path $sdkRoot)) { return }
+
+    $version = Get-ChildItem (Join-Path $sdkRoot 'Include') -Directory |
+        Where-Object { $_.Name -match '^10\.' } |
+        Sort-Object { [version]$_.Name } -Descending |
+        Select-Object -First 1
+    if (-not $version) { return }
+
+    $includeExtra = @(
+        (Join-Path $sdkRoot "Include\$($version.Name)\ucrt")
+        (Join-Path $sdkRoot "Include\$($version.Name)\um")
+        (Join-Path $sdkRoot "Include\$($version.Name)\shared")
+    ) | Where-Object { Test-Path $_ }
+
+    $libExtra = @(
+        (Join-Path $sdkRoot "Lib\$($version.Name)\ucrt\x64")
+        (Join-Path $sdkRoot "Lib\$($version.Name)\um\x64")
+    ) | Where-Object { Test-Path $_ }
+
+    if ($includeExtra) {
+        Write-Host "[Stockpot] vcvars 没拿到 SDK 路径，按目录补上：$($version.Name)" -ForegroundColor DarkGray
+        $env:INCLUDE = ($includeExtra + $env:INCLUDE) -join ';'
+        $env:LIB = ($libExtra + $env:LIB) -join ';'
+    }
+}
+
 function Initialize-Rust {
     if (Get-Command cargo -ErrorAction SilentlyContinue) { return }
     $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
@@ -66,6 +100,7 @@ function Initialize-Rust {
 }
 
 Initialize-Msvc
+Complete-WindowsSdk
 Initialize-Rust
 
 Write-Host "[Stockpot] Command: $Command" -ForegroundColor Cyan
