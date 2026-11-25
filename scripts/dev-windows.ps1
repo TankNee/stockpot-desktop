@@ -22,7 +22,12 @@
 param(
     [Parameter(Position = 0)]
     [ValidateSet('dev', 'check', 'build', 'test', 'cli', 'tauri-build', 'run')]
-    [string]$Command = 'dev'
+    [string]$Command = 'dev',
+
+    # 透传给底层命令的额外参数，比如只打 NSIS 包：
+    #   dev-windows.ps1 tauri-build --bundles nsis
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Extra = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,23 +109,23 @@ Initialize-Msvc
 Complete-WindowsSdk
 Initialize-Rust
 
-Write-Host "[Stockpot] Command: $Command" -ForegroundColor Cyan
+Write-Host "[Stockpot] Command: $Command $($Extra -join ' ')" -ForegroundColor Cyan
 
 switch ($Command) {
     'dev' {
         Push-Location $root
-        try { & pnpm tauri dev } finally { Pop-Location }
+        try { & pnpm tauri dev @Extra } finally { Pop-Location }
     }
     'tauri-build' {
         Push-Location $root
-        try { & pnpm tauri build } finally { Pop-Location }
+        try { & pnpm tauri build @Extra } finally { Pop-Location }
     }
-    'check' { & cargo check --manifest-path (Join-Path $tauriDir 'Cargo.toml') --all-targets }
-    'build' { & cargo build --manifest-path (Join-Path $tauriDir 'Cargo.toml') }
-    'test'  { & cargo test  --manifest-path (Join-Path $tauriDir 'Cargo.toml') }
-    'run'   { & cargo run   --manifest-path (Join-Path $tauriDir 'Cargo.toml') }
+    'check' { & cargo check --manifest-path (Join-Path $tauriDir 'Cargo.toml') --all-targets @Extra }
+    'build' { & cargo build --manifest-path (Join-Path $tauriDir 'Cargo.toml') @Extra }
+    'test'  { & cargo test  --manifest-path (Join-Path $tauriDir 'Cargo.toml') @Extra }
+    'run'   { & cargo run   --manifest-path (Join-Path $tauriDir 'Cargo.toml') @Extra }
     'cli' {
-        & cargo run --manifest-path (Join-Path $tauriDir 'Cargo.toml') -- cli --help
+        & cargo run --manifest-path (Join-Path $tauriDir 'Cargo.toml') -- cli --help @Extra
     }
 }
 
