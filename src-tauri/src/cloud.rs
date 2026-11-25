@@ -490,22 +490,32 @@ pub async fn fetch(app: &AppHandle) -> Result<Value, String> {
         .map_err(|error| format!("账本读不出来：{error}"))
 }
 
-async fn put(app: &AppHandle, base_rev: u64, doc: &Value) -> Result<(), String> {
+async fn put(app: &AppHandle, base_rev: u64, body: &str) -> Result<Option<Value>, String> {
     let token = token(app).ok_or("先登录再同步")?;
     let base = server_base(app);
+    // body 已经是序列化好的账本文档，这里只在外面包一层 {baseRev, ledger}。
+    // 原来是先拼一个 json!({..., "ledger": doc})：那会把整份账本深拷贝一遍，
+    // 再整体序列化一次，三千多条时白白多花几十毫秒。
+    let payload = format!("{{\"baseRev\":{base_rev},\"ledger\":{body}}}");
     let response = reqwest::Client::new()
         .put(format!("{base}/api/v1/ledger"))
         .bearer_auth(token)
-        .json(&json!({ "baseRev": base_rev, "ledger": doc }))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(payload)
         .timeout(std::time::Duration::from_secs(25))
         .send()
         .await
         .map_err(|error| format!("推不上去：{error}"))?;
     if response.status().is_success() {
-        return Ok(());
+        return Ok(None);
     }
     if response.status().as_u16() == 409 {
-        return Err("conflict".into());
+        // 服务器把手上那份一起带回来了，直接拿去合
+        let remote = response
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("云端账本读不出来：{error}"))?;
+        return Ok(Some(remote));
     }
     Err(format!("服务器拒收（{}）", response.status().as_u16()))
 }
@@ -513,23 +523,49 @@ async fn put(app: &AppHandle, base_rev: u64, doc: &Value) -> Result<(), String> 
 /// 把一份文档推上去。撞上别的设备改过（409）就拉下来合一次再推，
 /// 最多来回两轮——再纠缠下去说明两台机器在互相顶，交给下次改动。
 pub async fn push_document(app: &AppHandle, doc: Value) -> Result<Value, String> {
+    let body = serde_json::to_string(&doc).map_err(|error| format!("账本序列化失败：{error}"))?;
     let mut current = doc;
+    let mut json = body;
     for attempt in 0..2 {
         let remote = fetch(app).await?;
         let rev = remote.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
-        match put(app, rev, &current).await {
-            Ok(()) => return Ok(current),
-            Err(error) if error == "conflict" && attempt == 0 => {
-                if let Some(remote_doc) = remote.get("ledger").cloned().filter(|v| !v.is_null()) {
-                    current = merge_documents(&current, &remote_doc);
+        match put(app, rev, &json).await {
+            Ok(None) => return Ok(current),
+            Ok(Some(remote_doc)) if attempt == 0 => {
+                let remote_ledger = remote_doc.get("ledger").cloned().filter(|v| !v.is_null());
+                if let Some(remote_ledger) = remote_ledger {
+                    current = merge_documents(&current, &remote_ledger);
                     apply_document(app, &current)?;
+                    json = serde_json::to_string(&current)
+                        .map_err(|error| format!("账本序列化失败：{error}"))?;
                 }
             }
-            Err(error) if error == "conflict" => return Err("同步一直在打架，下次改动再试".into()),
+            Ok(Some(_)) => return Err("同步一直在打架，下次改动再试".into()),
             Err(error) => return Err(error),
         }
     }
     Ok(current)
+}
+
+/// 本地文档「动没动」的便宜判据。
+///
+/// 账本三千多条时，把它摊成 `Value` 再转成字符串要几十毫秒；自动上行原来每
+/// 2.5 秒就这么干一次，等于一直在后台烧 CPU，还占着账本的锁——界面正要点开
+/// 列表或者保存，就得排队等它。现在先看改动计数器：没动就直接跳过，一个字节
+/// 都不序列化。
+fn local_stamp(app: &AppHandle) -> (u64, u64) {
+    let rev = app.state::<crate::ledger::LedgerState>().revision();
+    let state = app.state::<AppState>();
+    let data = state.data.lock().unwrap();
+    // 自选股和券商账户就这么点，序列化一次不到 1 KB
+    let small = serde_json::to_vec(&(&data.stocks, &data.accounts)).unwrap_or_default();
+    (rev, fingerprint_bytes(&small))
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// 后台自动上行。
@@ -541,17 +577,28 @@ pub async fn push_document(app: &AppHandle, doc: Value) -> Result<Value, String>
 /// 启动时先把当前内容记成「已推过」，不然一开 App 就把本地覆盖到云端。
 pub fn start_autosync(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let mut stamp = local_stamp(&app);
         let mut last = fingerprint(&local_document(&app));
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            let now = local_stamp(&app);
             if token(&app).is_none() {
                 // 退出登录后重新登录，应该以登录时的合并结果为准
-                last = fingerprint(&local_document(&app));
+                if now != stamp {
+                    stamp = now;
+                    last = fingerprint(&local_document(&app));
+                }
                 continue;
             }
+            if now == stamp {
+                // 这 2.5 秒里什么都没改：连指纹都不用算
+                continue;
+            }
+            stamp = now;
             let doc = local_document(&app);
             let current = fingerprint(&doc);
             if !should_push(last, current, true) {
+                last = current;
                 continue;
             }
             match push_document(&app, doc).await {

@@ -15,7 +15,9 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 z-50 bg-[oklch(0.18_0.02_65/0.34)] backdrop-blur-[2px]",
+        // 别加 backdrop-blur：WebKit 上要整块重画一遍背景，弹窗一开一关都卡在
+        // 这一下；压暗一层就够把焦点拉过来了。
+        "fixed inset-0 z-50 bg-[oklch(0.18_0.02_65/0.34)]",
         "data-[state=open]:animate-in data-[state=closed]:animate-out",
         "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
         className,

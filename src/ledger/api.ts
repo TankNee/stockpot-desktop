@@ -257,6 +257,12 @@ export const ledgerApi = {
     return invoke<LedgerState>("ledger_state");
   },
 
+  /** 告诉后端「这批内容窗口已经画出来了」。后端据此跳过「再整份推一遍」。 */
+  async ack(): Promise<void> {
+    if (!isTauri) return;
+    await invoke("ledger_ack");
+  },
+
   async add(input: EntryInput): Promise<Ledger> {
     if (!isTauri) {
       const ledger = loadDemo();

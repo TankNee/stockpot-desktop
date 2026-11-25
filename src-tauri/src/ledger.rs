@@ -666,17 +666,32 @@ pub fn load_with_status(dir: &Path) -> (Ledger, bool) {
 }
 
 /// Write through a temp file so a crash mid-save cannot truncate the ledger.
-pub fn save(dir: &Path, ledger: &Ledger) -> Result<(), String> {
+///
+/// 落盘后把内容的指纹一起返回。文件监听器靠它分辨「这次改动是我们自己写的」，
+/// 从而不去把整份账本重新解析一遍再推给前端——一次保存白干两回的根源就在那。
+pub fn save(dir: &Path, ledger: &Ledger) -> Result<u64, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = ledger_path(dir);
     let tmp = path.with_extension("json.tmp");
-    let body = serde_json::to_string_pretty(ledger).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // 紧凑格式：三千多条时缩进能多占近三分之一体积，而这份文件谁也不看，
+    // 省下来的都是每次保存的序列化时间和磁盘写入。
+    let body = serde_json::to_string(ledger).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, &body).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     // Keep one rolling backup; a ledger is small and losing it is expensive.
     let backup = path.with_extension("json.bak");
     let _ = std::fs::copy(&path, &backup);
-    Ok(())
+    Ok(hash_bytes(body.as_bytes()))
+}
+
+/// FNV-1a：只用来判断「还是不是同一份内容」，不走加密用途。
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,6 +1372,13 @@ fn is_fund_earning(text: &str) -> bool {
 pub struct LedgerState {
     pub ledger: std::sync::Mutex<Ledger>,
     pub dir: PathBuf,
+    /// 每次成功落盘 +1。自动上行拿它当「本地到底动了没有」的判据：
+    /// 没动就一个字节都不序列化，动了才去算指纹。
+    rev: std::sync::atomic::AtomicU64,
+    /// 最近一次自己写出去的内容指纹。文件监听器比一下就知道这次改动是不是自己写的。
+    saved: std::sync::atomic::AtomicU64,
+    /// 账本窗口盖过的章：它已经把这批内容画出来了。
+    ack: std::sync::atomic::AtomicU64,
 }
 
 impl LedgerState {
@@ -1371,6 +1393,9 @@ impl LedgerState {
         Self {
             ledger: std::sync::Mutex::new(ledger),
             dir,
+            rev: std::sync::atomic::AtomicU64::new(0),
+            saved: std::sync::atomic::AtomicU64::new(0),
+            ack: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1378,17 +1403,55 @@ impl LedgerState {
         self.ledger.lock().unwrap().clone()
     }
 
+    /// 本地账本被改过多少次。只增不减，只用来比「有没有变」。
+    pub fn revision(&self) -> u64 {
+        self.rev.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 自己最后一次写出去的内容指纹；0 表示还没写过。
+    pub fn last_saved(&self) -> u64 {
+        self.saved.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 账本窗口说「这批内容我已经画出来了」。
+    pub fn acknowledge(&self) {
+        self.ack
+            .store(self.last_saved(), std::sync::atomic::Ordering::Release);
+    }
+
+    /// 盘上这份内容要不要推给窗口。
+    ///
+    /// 自己点保存的那条路，命令的返回值已经把新账本交给窗口了，窗口随后盖章；
+    /// 盖过章就不必再把几 MB 的 JSON 解析一遍、推一遍、整页重渲染一遍。
+    /// 没盖章说明是别的窗口（设置页改分类、规则）写的、或者同步从云端换下来的，
+    /// 那就得推。
+    pub fn needs_broadcast(&self, file_hash: u64) -> bool {
+        let saved = self.last_saved();
+        if saved == 0 || file_hash != saved {
+            return true;
+        }
+        saved != self.ack.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     fn persist(&self, ledger: &Ledger) -> Result<(), String> {
-        save(&self.dir, ledger)
+        let hash = save(&self.dir, ledger)?;
+        self.saved.store(hash, std::sync::atomic::Ordering::Release);
+        self.rev.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
     }
 
     /// 整份换掉：同步把云端那份合并下来时用。
     ///
     /// 只写盘是不够的——内存里那份不跟着换，下一次编辑就会拿旧的覆盖回去，
     /// 刚同步进来的账全没了。所以落盘成功之后立刻换内存。
+    ///
+    /// 记的指纹清成 0：这份内容是从云端来的，界面还没见过，文件监听器得照常
+    /// 通知窗口刷新。（自己点保存的那条路走 `persist`，窗口本来就拿到了新账本。）
     pub fn replace(&self, ledger: Ledger) -> Result<(), String> {
         save(&self.dir, &ledger)?;
         *self.ledger.lock().unwrap() = ledger;
+        self.saved.store(0, std::sync::atomic::Ordering::Release);
+        self.rev.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 }
@@ -3573,6 +3636,66 @@ mod tests {
 
         assert_eq!(state.snapshot().entries.len(), 2, "内存没跟着换");
         assert_eq!(load(&dir).entries.len(), 2, "盘上没写进去");
+        // replace 是从云端来的内容：界面还没见过，监听器得照常通知
+        assert_eq!(state.last_saved(), 0, "同步写进来的不该被当成「自己写的」");
+        assert!(
+            state.needs_broadcast(hash_bytes(&std::fs::read(ledger_path(&dir)).unwrap())),
+            "云端换下来的账本要推给窗口"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revision_moves_only_when_something_is_written() {
+        let (state, dir) = temp_state();
+        let before = state.revision();
+        assert_eq!(state.last_saved(), 0);
+
+        state
+            .add(EntryInput {
+                date: "2026-11-01".into(),
+                kind: "expense".into(),
+                amount: 1200,
+                category: "餐饮".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(state.revision(), before + 1, "改一次账要 +1");
+
+        // 自己写的这份，指纹要和盘上的字节对得上——监听器就靠这个跳过回推
+        let bytes = std::fs::read(ledger_path(&dir)).unwrap();
+        let written = hash_bytes(&bytes);
+        assert_eq!(written, state.last_saved());
+        // 窗口还没盖章：这时候还得推一次，不然别的窗口看不到
+        assert!(state.needs_broadcast(written));
+        state.acknowledge();
+        assert!(!state.needs_broadcast(written), "盖过章的内容不该再推一遍");
+        // 盘上换了别的内容（比如 CLI 改的），盖不盖章都得推
+        assert!(state.needs_broadcast(written ^ 0xff));
+
+        // 没改就不会动；自动上行靠这个「不动」判断要不要序列化
+        let steady = state.revision();
+        let _ = state.snapshot();
+        assert_eq!(state.revision(), steady);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_copy_is_compact_but_still_reads_back() {
+        let (state, dir) = temp_state();
+        state
+            .add(EntryInput {
+                date: "2026-11-02".into(),
+                kind: "expense".into(),
+                amount: 990,
+                category: "餐饮".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let raw = std::fs::read_to_string(ledger_path(&dir)).unwrap();
+        // 缩进没了，体积省下来；内容还是原来那份
+        assert!(!raw.contains("\n  "), "还在写缩进版：{}", &raw[..raw.len().min(80)]);
+        assert_eq!(load(&dir).entries.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3607,5 +3730,48 @@ mod tests {
         assert_eq!(back.entries[0].amount, 1234);
         assert!(ledger_path(&dir).with_extension("json.bak").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 拿真实账本量一遍各条路的开销。默认不跑：
+    /// `cargo test --lib big_ledger_costs -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn big_ledger_costs() {
+        let path = std::env::var("STOCKPOT_LEDGER").unwrap_or_else(|_| {
+            format!(
+                "{}/com.stockpot.app/ledger.json",
+                std::env::var("APPDATA").unwrap_or_default()
+            )
+        });
+        let raw = std::fs::read_to_string(&path).expect("real ledger");
+        println!("file {} KB", raw.len() / 1024);
+
+        let t = std::time::Instant::now();
+        let ledger: Ledger = serde_json::from_str(&raw).unwrap();
+        println!("from_str   {:?}  ({} 条)", t.elapsed(), ledger.entries.len());
+
+        let t = std::time::Instant::now();
+        let compact = serde_json::to_string(&ledger).unwrap();
+        println!("to_string  {:?}  ({} KB)", t.elapsed(), compact.len() / 1024);
+
+        let t = std::time::Instant::now();
+        let pretty = serde_json::to_string_pretty(&ledger).unwrap();
+        println!("pretty     {:?}  ({} KB)", t.elapsed(), pretty.len() / 1024);
+
+        let t = std::time::Instant::now();
+        let value = serde_json::to_value(&ledger).unwrap();
+        println!("to_value   {:?}", t.elapsed());
+
+        let t = std::time::Instant::now();
+        let text = value.to_string();
+        println!("value→str  {:?}  ({} KB)", t.elapsed(), text.len() / 1024);
+
+        let t = std::time::Instant::now();
+        let cloned = ledger.clone();
+        println!("clone      {:?}  ({} 条)", t.elapsed(), cloned.entries.len());
+
+        let t = std::time::Instant::now();
+        let _ = serde_json::to_vec(&serde_json::json!({ "rev": 1, "ledger": value })).unwrap();
+        println!("包一层再序列化 {:?}", t.elapsed());
     }
 }

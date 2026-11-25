@@ -63,6 +63,7 @@ export function useVirtualWindow(
   }, [enabled, measure, offsets.length]);
 
   if (!enabled) {
+    // offsets 是长度 n+1 的前缀和，最后一项的下标就是条数
     return { start: 0, end: offsets.length - 1, padTop: 0, padBottom: 0 };
   }
   return visibleRange(offsets, frame.scrollTop - frame.listTop, frame.height);

@@ -48,8 +48,18 @@ pub fn start(app: &AppHandle) {
             *last = Instant::now();
             drop(last);
             if ledger_changed {
-                let ledger = ledger::load(&dir);
-                let _ = app.emit("ledger-changed", ledger);
+                // 自己刚写完、窗口也已经画出来的那一次不要回推：命令的返回值已经把
+                // 新账本交给窗口了，再解析一遍几 MB 的 JSON、再整份推回前端、再整页
+                // 重渲染一次，等于每存一次白干两回——「保存发卡」大半来自这里。
+                let state = app.state::<ledger::LedgerState>();
+                let path = dir.join("ledger.json");
+                let ours = std::fs::read(&path)
+                    .map(|bytes| !state.needs_broadcast(ledger::hash_bytes(&bytes)))
+                    .unwrap_or(false);
+                if !ours {
+                    let ledger = ledger::load(&dir);
+                    let _ = app.emit("ledger-changed", ledger);
+                }
             }
             if data_changed {
                 let data = store::read_data_file(&dir);

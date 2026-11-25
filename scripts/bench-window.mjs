@@ -4,11 +4,14 @@
 // 用法：先 `pnpm dev`，再 `node scripts/bench-window.mjs [条数] [重复次数]`
 // 它自己拉起一个 headless Chrome，走 CDP，不需要额外装依赖。
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const COUNT = Number(process.argv[2] ?? 3200);
+// SEED_FILE 指向真实的 ledger.json 时，直接拿真账本压：合成数据里每个月都是
+// 均分的，真账本却是「有的月两百多条、有的月很空」，量出来的数才对得上体感。
+const SEED_FILE = process.env.SEED_FILE ?? "";
 // SPREAD=month 时把这 COUNT 笔全塞进当月，用来模拟「一个月就几千条」
 const SPREAD = process.env.SPREAD === "month" ? "month" : "year";
 const ROUNDS = Number(process.argv[3] ?? 3);
@@ -138,7 +141,22 @@ const seed = (count, spread) => `(() => { try {
   } catch (e) { window.__seedError = String(e && e.stack || e); }
 })()`;
 
-await call("Page.addScriptToEvaluateOnNewDocument", { source: seed(COUNT, SPREAD) });
+/** 真账本原样塞进去，连当月是几月、哪个月条数多都跟用户机器上一样。 */
+const realSeed = SEED_FILE ? readFileSync(SEED_FILE, "utf8") : null;
+const realSeedScript = () => {
+  const doc = JSON.parse(realSeed);
+  return `(() => { try {
+  const doc = ${JSON.stringify(doc)};
+  localStorage.setItem("stockpot.ledger.v1", JSON.stringify(doc));
+  localStorage.setItem("__pending", JSON.stringify({ lang: "zh", theme: "light" }));
+  window.__seeded = (doc.entries || []).length;
+  } catch (e) { window.__seedError = String(e && e.stack || e); }
+})()`;
+};
+
+await call("Page.addScriptToEvaluateOnNewDocument", {
+  source: realSeed ? realSeedScript() : seed(COUNT, SPREAD),
+});
 
 /** 页面里跑的测量脚本：点一下，等到两帧之后再算结束。 */
 const probe = `(async () => {

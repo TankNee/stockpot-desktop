@@ -425,6 +425,7 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
         const next = event.payload;
         if (!next || !Array.isArray(next.entries)) return;
         setLedger(next);
+        void ledgerApi.ack().catch(() => {});
       });
     })();
     return () => unlisten?.();
@@ -463,6 +464,9 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
       try {
         const next = await op();
         setLedger(next);
+        // 这批内容窗口已经有了：跟后端说一声，它就跳过「再解析一遍、整份推回来」。
+        // 不 await——盖章只省后台的一遍活，不该挡住界面。
+        void ledgerApi.ack().catch(() => {});
         setError(null);
       } catch (err) {
         setError(String(err));
@@ -511,6 +515,7 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
       const outcome = await ledgerApi.autoTidy();
       // The tidy already returns the new ledger; adopting it skips a round trip.
       setLedger(outcome.ledger);
+      void ledgerApi.ack().catch(() => {});
       return outcome;
     },
     addProject: (input) => run(() => ledgerApi.addProject(input)),
@@ -526,6 +531,7 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
     importBill: async (file, bytes, ai = false, source) => {
       const outcome = await ledgerApi.import(file, bytes, ai, source);
       setLedger(outcome.ledger);
+      void ledgerApi.ack().catch(() => {});
       return {
         added: outcome.added,
         duplicates: outcome.duplicates,

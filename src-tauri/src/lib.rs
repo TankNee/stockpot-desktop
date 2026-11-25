@@ -210,8 +210,12 @@ async fn sync_run(app: AppHandle, mode: String) -> Result<serde_json::Value, Str
     let state = app.state::<AppState>();
     broadcast(&app, &state);
     // 账本窗口拿到的是整份账本，不是空对象——它会把 payload 直接当文档渲染，
-    // 传空的话 entries 是 undefined，整页就白屏了（macOS 上踩过）
-    let _ = app.emit("ledger-changed", ledger::load(&state.dir));
+    // 传空的话 entries 是 undefined，整页就白屏了（macOS 上踩过）。
+    // 从内存那份拿，别再把几 MB 的 JSON 从盘上读回来解析一遍。
+    let _ = app.emit(
+        "ledger-changed",
+        app.state::<ledger::LedgerState>().snapshot(),
+    );
 
     Ok(serde_json::json!({
         "mode": applied,
@@ -1061,8 +1065,23 @@ async fn ledger_assets(app: AppHandle) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// 窗口打开时一次性要的那几样东西。
+///
+/// 特意不用 `json!` 拼：那会先把整份账本摊成一棵 `Value` 树，再整体序列化给
+/// 前端，三千多条等于把同一份数据编两遍。直接给个结构体，serde 一遍写完，
+/// 省下的是开窗口的第一下。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerBoot {
+    ledger: ledger::Ledger,
+    data_dir: String,
+    theme: String,
+    language: String,
+    color_scheme: String,
+}
+
 #[tauri::command]
-async fn ledger_state(app: AppHandle) -> serde_json::Value {
+async fn ledger_state(app: AppHandle) -> LedgerBoot {
     let snapshot = with_ledger(&app, |l| l.snapshot());
     let dir = store::data_dir(&app);
     // QA hook: proves the ledger webview booted and reached IPC.
@@ -1075,13 +1094,22 @@ async fn ledger_state(app: AppHandle) -> serde_json::Value {
     // The ledger follows the app's theme and language; both live in the stock
     // settings, so the window does not keep its own copy.
     let settings = with_state(&app, |s| s.settings());
-    serde_json::json!({
-        "ledger": snapshot,
-        "dataDir": dir.to_string_lossy(),
-        "theme": settings.theme,
-        "language": settings.language,
-        "colorScheme": settings.color_scheme,
-    })
+    LedgerBoot {
+        ledger: snapshot,
+        data_dir: dir.to_string_lossy().into_owned(),
+        theme: settings.theme,
+        language: settings.language,
+        color_scheme: settings.color_scheme,
+    }
+}
+
+/// 账本窗口画完一批新内容后回来说一声。
+///
+/// 文件监听器拿这个章判断「这次改动是不是自己这扇窗已经画过了」，从而跳过
+/// 一次「解析几 MB + 整份推回前端 + 整页重渲染」。
+#[tauri::command]
+fn ledger_ack(app: AppHandle) {
+    app.state::<ledger::LedgerState>().acknowledge();
 }
 
 #[tauri::command]
@@ -1952,6 +1980,7 @@ pub fn run() {
             agent_skills,
             ledger_assets,
             ledger_state,
+            ledger_ack,
             ledger_add,
             ledger_update,
             ledger_delete,
