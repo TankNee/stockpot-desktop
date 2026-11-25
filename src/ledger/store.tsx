@@ -18,6 +18,11 @@ import type {
   WalletInput,
 } from "./types";
 
+// 纯规则搬到 money.ts 了，这里原样转出，老引用不用改
+import { countsTowardTotals, effectiveAmount, monthOf } from "./money";
+
+export { countsTowardTotals, effectiveAmount, monthOf };
+
 /** Cents → "1,234.56". Kept separate from `formatMoney` (which deals in yuan and
  *  a display currency) because the ledger is entirely local-currency cents. */
 export function formatCents(cents: number, lang: Lang = "zh"): string {
@@ -49,11 +54,6 @@ export function formatYuan(cents: number, lang: Lang = "zh", signed = false): st
   return `${sign}¥${formatCents(Math.abs(cents), lang)}`;
 }
 
-/** `2026-11` for the month buckets. */
-export function monthOf(date: string): string {
-  return date.slice(0, 7);
-}
-
 /** Shift a `YYYY-MM` key by whole months, crossing year boundaries. */
 export function shiftMonth(month: string, delta: number): string {
   const [year, mon] = month.split("-").map(Number);
@@ -82,22 +82,6 @@ export interface MonthSummary {
   /** Expense by category, largest first. */
   byCategory: CategoryTotal[];
   count: number;
-}
-
-/** What a row actually cost after any linked refund. */
-export function effectiveAmount(entry: LedgerEntry): number {
-  if (entry.kind !== "expense") return entry.amount;
-  return Math.max(0, entry.amount - (entry.refundedAmount ?? 0));
-}
-
-/** Whether a row belongs in the numbers.
- *
- *  `excluded` rows are visible but ignored (refunds, card repayments);
- *  `archived` rows were set aside by 整理账单 and are hidden from the everyday
- *  lists altogether. Neither counts toward a total, so every aggregate goes
- *  through this one predicate instead of repeating the rule. */
-export function countsTowardTotals(entry: LedgerEntry): boolean {
-  return !entry.excluded && !entry.archived;
 }
 
 export function summarize(entries: LedgerEntry[], month: string): MonthSummary {

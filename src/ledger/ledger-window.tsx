@@ -1,4 +1,5 @@
 import * as React from "react";
+import { dayTotals, groupByDay, totalsOf } from "./derive";
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import {
@@ -962,12 +963,16 @@ function ProjectDetail({ project, onBack, onAttach, onArchive, onDelete, onEdit,
   // be undone, so it takes a second click like the row delete does.
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   React.useEffect(() => setConfirmDelete(false), [project.id]);
-  const rows = (ledger?.entries ?? []).filter((entry) => entry.projectId === project.id && countsTowardTotals(entry));
-  const expense = rows.filter((entry) => entry.kind === "expense").reduce((sum, entry) => sum + effectiveAmount(entry), 0);
-  const income = rows.filter((entry) => entry.kind === "income").reduce((sum, entry) => sum + entry.amount, 0);
-  const dates = [...new Set(rows.map((entry) => entry.date))].sort();
-  const days = dates.length;
-  const daily = dates.map((date) => ({ date, value: rows.filter((entry) => entry.date === date && entry.kind === "expense").reduce((sum, entry) => sum + effectiveAmount(entry), 0) }));
+  const rows = React.useMemo(
+    () => (ledger?.entries ?? []).filter((entry) => entry.projectId === project.id && countsTowardTotals(entry)),
+    [ledger, project.id],
+  );
+  // 原来这里对每一天又过滤一遍全部行，项目里几百上千条时每次点击都要跑好几万次比较
+  const sums = React.useMemo(() => totalsOf(rows), [rows]);
+  const expense = sums.expense;
+  const income = sums.income;
+  const daily = React.useMemo(() => dayTotals(rows), [rows]);
+  const days = daily.length;
   const max = Math.max(1, ...daily.map((day) => day.value));
   // About eight labels fit across the plot before they collide.
   const labelStep = Math.max(1, Math.ceil(daily.length / 8));
@@ -2430,28 +2435,11 @@ function EntriesTab({
     if (target !== month) setMonth(target);
   }, [initialDay, month, setMonth]);
 
-  const total = live.reduce(
-    (acc, row) => {
-      if (row.kind === "expense") acc.expense += effectiveAmount(row);
-      if (row.kind === "income") acc.income += row.amount;
-      return acc;
-    },
-    { expense: 0, income: 0 },
-  );
+  const total = React.useMemo(() => totalsOf(live), [live]);
 
   // Day buckets, newest first — the fastest way to read a month is a running
   // total per day, not one long list.
-  const groups = React.useMemo(() => {
-    const map = new Map<string, { rows: LedgerEntry[]; expense: number; income: number }>();
-    for (const row of live) {
-      const bucket = map.get(row.date) ?? { rows: [], expense: 0, income: 0 };
-      bucket.rows.push(row);
-      if (row.kind === "expense") bucket.expense += effectiveAmount(row);
-      if (row.kind === "income") bucket.income += row.amount;
-      map.set(row.date, bucket);
-    }
-    return [...map.entries()].sort((a, b) => b[0].localeCompare(a[0]));
-  }, [rows]);
+  const groups = React.useMemo(() => groupByDay(live), [live]);
 
   return (
     <div className="flex flex-col gap-3">
@@ -2567,10 +2555,10 @@ function EntriesTab({
         {live.length === 0 ? (
           <p className="px-3 py-8 text-center text-[12px] text-faint">{t("ledger.entries.empty")}</p>
         ) : sort === "date" && grouped ? (
-          groups.map(([date, bucket]) => (
-            <div key={date}>
+          groups.map((bucket) => (
+            <div key={bucket.date}>
               <div className="flex items-center gap-2 border-b border-hairline/40 bg-surface/40 px-3 py-[4px] text-[11px]">
-                <span className="num font-semibold text-foreground">{date.slice(5)}</span>
+                <span className="num font-semibold text-foreground">{bucket.date.slice(5)}</span>
                 <span className="text-faint">
                   {t("ledger.entries.dayCount", { n: bucket.rows.length })}
                 </span>
