@@ -1,7 +1,7 @@
 {
   "name": "stockpot",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,10 @@
     "win:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-windows.ps1 dev",
     "win:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-windows.ps1 tauri-build",
     "win:test": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/dev-windows.ps1 test",
-    "bench": "node scripts/bench-ledger.mjs"
+    "bench": "node scripts/bench-ledger.mjs",
+    "test:window": "node scripts/test-window.mjs",
+    "bench:ui": "node scripts/bench-window.mjs",
+    "check": "tsc --noEmit && node scripts/test-window.mjs"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.2.6",

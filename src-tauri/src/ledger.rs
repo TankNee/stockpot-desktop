@@ -1381,6 +1381,16 @@ impl LedgerState {
     fn persist(&self, ledger: &Ledger) -> Result<(), String> {
         save(&self.dir, ledger)
     }
+
+    /// 整份换掉：同步把云端那份合并下来时用。
+    ///
+    /// 只写盘是不够的——内存里那份不跟着换，下一次编辑就会拿旧的覆盖回去，
+    /// 刚同步进来的账全没了。所以落盘成功之后立刻换内存。
+    pub fn replace(&self, ledger: Ledger) -> Result<(), String> {
+        save(&self.dir, &ledger)?;
+        *self.ledger.lock().unwrap() = ledger;
+        Ok(())
+    }
 }
 
 fn now_stamp() -> String {
@@ -3526,6 +3536,44 @@ mod tests {
         assert_eq!(normalize_date("2024/03/01").unwrap(), "2024-03-01");
         assert_eq!(normalize_date("2024年03月01日 08:05").unwrap(), "2024-03-01 08:05");
         assert!(normalize_date("not a date").is_none());
+    }
+
+    #[test]
+    fn replace_swaps_disk_and_memory_together() {
+        // 同步合并下来的那份必须同时进内存，否则下一次编辑会拿旧的盖回去
+        let dir = std::env::temp_dir().join(format!("stockpot-replace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = LedgerState::new(dir.clone());
+        assert_eq!(state.snapshot().entries.len(), 0);
+
+        let mut next = Ledger::with_defaults();
+        for (index, id) in ["a", "b"].iter().enumerate() {
+            next.entries.push(Entry {
+                id: (*id).into(),
+                date: "2024-03-01".into(),
+                time: String::new(),
+                kind: "expense".into(),
+                amount: 100 + index as i64,
+                category: "餐饮".into(),
+                account: "现金".into(),
+                counterparty: "面馆".into(),
+                note: String::new(),
+                source: "manual".into(),
+                external_id: String::new(),
+                excluded: false,
+                archived: false,
+                refunded_amount: 0,
+                refunded_at: String::new(),
+                category_locked: false,
+                project_id: String::new(),
+                created_at: "2024-03-01T12:00:00".into(),
+            });
+        }
+        state.replace(next).unwrap();
+
+        assert_eq!(state.snapshot().entries.len(), 2, "内存没跟着换");
+        assert_eq!(load(&dir).entries.len(), 2, "盘上没写进去");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1127,6 +1127,14 @@ mod tests {
 
     #[test]
     fn date_filters_work_in_argv_and_stdin() {
+        // 这一条要靠「stdin 读到 EOF」才会返回。在终端里直接跑 cargo test 时
+        // stdin 是控制台，读下去就永远不返回，整个测试套件会挂在这儿。
+        // CI 里 stdin 是 /dev/null，所以只有本机会中招——不是代码的毛病。
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            eprintln!("stdin 是终端，跳过：这条要有 EOF 才走得到");
+            return;
+        }
         let dir = temp_dir();
         for (date, merchant) in [("2026-10-01", "十月"), ("2026-10-31", "月末"), ("2026-11-01", "十一月")] {
             let input = format!(r#"{{"date":"{date}","kind":"expense","yuan":1,"category":"其他","counterparty":"{merchant}"}}"#);

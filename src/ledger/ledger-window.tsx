@@ -35,7 +35,9 @@ import { Input } from "@/components/ui/input";
 import { Section } from "@/components/ui/section";
 import { Tooltip } from "@/components/ui/tooltip";
 import { TrendChart, CategoryPie, chartPalette } from "./recharts-charts";
-import { OverlayScroll } from "@/components/ui/overlay-scroll";
+import { OverlayScroll, useScrollViewport } from "@/components/ui/overlay-scroll";
+import { offsetsOf } from "./virtual";
+import { useVirtualWindow } from "./use-virtual-window";
 import {
   CategoryIcon,
   CategorySelect,
@@ -199,6 +201,16 @@ export function LedgerWindow() {
   const selected = view.selectedId
     ? ((ledger?.entries ?? []).find((entry) => entry.id === view.selectedId) ?? null)
     : null;
+  // 侧栏那个数字：每次渲染都过一遍几千条，纯属白算
+  const entryCount = React.useMemo(
+    () => (ledger ? ledger.entries.filter(countsTowardTotals).length : null),
+    [ledger],
+  );
+  // 这两个回调要稳：它们一变，整张流水表（几十上百行）就得跟着重渲染。
+  // 打开编辑弹窗、保存，都会让本组件重渲染，稳不住就白等。
+  const openEditor = React.useCallback((entry: LedgerEntry) => {
+    setComposer({ open: true, entry });
+  }, []);
 
   const navigate = React.useCallback((next: Omit<ViewState, "key">) => {
     setHistory((prev) => {
@@ -372,9 +384,9 @@ export function LedgerWindow() {
                 <span className={cn("sidebar-label min-w-0 flex-1 truncate text-left", compact && "is-collapsed")}>
                   {t(`ledger.tab.${id}`)}
                 </span>
-                {id === "entries" && ledger ? (
+                {id === "entries" && entryCount !== null ? (
                   <span className={cn("sidebar-label num shrink-0 text-[11px] text-faint", compact && "is-collapsed")}>
-                    {ledger.entries.filter(countsTowardTotals).length}
+                    {entryCount}
                   </span>
                 ) : null}
               </button>
@@ -523,7 +535,7 @@ export function LedgerWindow() {
                   key={view.key}
                   initialDay={view.day}
                   initialCategory={view.category}
-                  onEdit={(entry) => setComposer({ open: true, entry })}
+                  onEdit={openEditor}
                   onSelect={openEntry}
                 />
               ) : null}
@@ -2338,6 +2350,16 @@ function MonthCalendar({
   );
 }
 
+/** 行高。窗口化按这三个数算位置，改动要同步改 EntryRow / 日期头里的 style。 */
+const ROW_H = 39;
+/** 带退款的那行金额下面多一行小字。 */
+const ROW_TALL_H = 44;
+const DAY_H = 27;
+/** 归档块不做窗口化（它是另开的一段，跟主表共用滚动），所以封顶。 */
+const ARCHIVED_CAP = 200;
+/** 退款候选同理：挑一条就够，没必要把几千行都塞进那个小弹窗。 */
+const REFUND_CAP = 50;
+
 function EntriesTab({
   onEdit,
   onSelect,
@@ -2440,6 +2462,52 @@ function EntriesTab({
   // Day buckets, newest first — the fastest way to read a month is a running
   // total per day, not one long list.
   const groups = React.useMemo(() => groupByDay(live), [live]);
+
+  // 行上要的图标和项目名，一次查好。原来每一行自己去 categories / projects 里
+  // find，3200 行就是 3200 次线性查找，纯属白花时间。
+  const iconByPath = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const def of categories) map.set(categoryPath(def), def.icon);
+    return map;
+  }, [categories]);
+  const projectNameById = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const project of ledger?.projects ?? []) map.set(project.id, project.name);
+    return map;
+  }, [ledger]);
+
+  // 把「日期头 + 行」摊平成一串，窗口化才有东西可算。分组和按金额排序是互斥的，
+  // 所以两条路径各自摊一份。
+  type Item =
+    | { kind: "day"; date: string; group: (typeof groups)[number] }
+    | { kind: "row"; entry: LedgerEntry };
+  const items = React.useMemo<Item[]>(() => {
+    if (sort === "date" && grouped) {
+      const out: Item[] = [];
+      for (const bucket of groups) {
+        out.push({ kind: "day", date: bucket.date, group: bucket });
+        for (const entry of bucket.rows) out.push({ kind: "row", entry });
+      }
+      return out;
+    }
+    return ordered.map((entry) => ({ kind: "row", entry }));
+  }, [groups, ordered, sort, grouped]);
+
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const viewport = useScrollViewport();
+  // 行高必须和 EntryRow / 日期头里写死的 style.height 一致，否则滚到后面会越算越偏。
+  const heights = React.useMemo(
+    () =>
+      items.map((item) =>
+        item.kind === "day" ? DAY_H : (item.entry.refundedAmount ?? 0) > 0 ? ROW_TALL_H : ROW_H,
+      ),
+    [items],
+  );
+  const offsets = React.useMemo(() => offsetsOf(heights), [heights]);
+  // 几十行的时候窗口化只会添乱，直接全渲染
+  const windowed = useVirtualWindow(viewport, listRef, offsets, items.length > 80);
+  const shown = windowed.end > windowed.start ? items.slice(windowed.start, windowed.end) : [];
+  const listHeight = offsets.length ? offsets[offsets.length - 1] : 0;
 
   return (
     <div className="flex flex-col gap-3">
@@ -2554,57 +2622,55 @@ function EntriesTab({
         </div>
         {live.length === 0 ? (
           <p className="px-3 py-8 text-center text-[12px] text-faint">{t("ledger.entries.empty")}</p>
-        ) : sort === "date" && grouped ? (
-          groups.map((bucket) => (
-            <div key={bucket.date}>
-              <div className="flex items-center gap-2 border-b border-hairline/40 bg-surface/40 px-3 py-[4px] text-[11px]">
-                <span className="num font-semibold text-foreground">{bucket.date.slice(5)}</span>
-                <span className="text-faint">
-                  {t("ledger.entries.dayCount", { n: bucket.rows.length })}
-                </span>
-                <span className="flex-1" />
-                {bucket.expense > 0 ? (
-                  <span className="num text-[color:var(--red)]">
-                    -{formatCents(bucket.expense, lang)}
-                  </span>
-                ) : null}
-                {bucket.income > 0 ? (
-                  <span className="num text-[color:var(--green)]">
-                    +{formatCents(bucket.income, lang)}
-                  </span>
-                ) : null}
-              </div>
-              {bucket.rows.map((entry) => (
-                <EntryRow
-                  key={entry.id}
-                  entry={entry}
-                  lang={lang}
-                  t={t}
-                  categories={categories}
-                  confirmId={confirmId}
-                  setConfirmId={setConfirmId}
-                  onEdit={onEdit}
-                  onSelect={onSelect}
-                  onRemove={remove}
-                />
-              ))}
-            </div>
-          ))
         ) : (
-          ordered.map((entry) => (
-            <EntryRow
-              key={entry.id}
-              entry={entry}
-              lang={lang}
-              t={t}
-              categories={categories}
-              confirmId={confirmId}
-              setConfirmId={setConfirmId}
-              onEdit={onEdit}
-              onSelect={onSelect}
-              onRemove={remove}
-            />
-          ))
+          // 只渲染视口里那几十行。总数靠外层这个 height 撑住，滚动条才不会跳。
+          <div ref={listRef} style={{ height: listHeight }}>
+            <div style={{ transform: `translateY(${windowed.padTop}px)` }}>
+              {shown.map((item) =>
+                item.kind === "day" ? (
+                  <div
+                    key={`d-${item.date}`}
+                    style={{ height: DAY_H }}
+                    className="flex items-center gap-2 border-b border-hairline/40 bg-surface/40 px-3 text-[11px]"
+                  >
+                    <span className="num font-semibold text-foreground">
+                      {item.date.slice(5)}
+                    </span>
+                    <span className="text-faint">
+                      {t("ledger.entries.dayCount", { n: item.group.rows.length })}
+                    </span>
+                    <span className="flex-1" />
+                    {item.group.expense > 0 ? (
+                      <span className="num text-[color:var(--red)]">
+                        -{formatCents(item.group.expense, lang)}
+                      </span>
+                    ) : null}
+                    {item.group.income > 0 ? (
+                      <span className="num text-[color:var(--green)]">
+                        +{formatCents(item.group.income, lang)}
+                      </span>
+                    ) : null}
+                  </div>
+                ) : (
+                  <EntryRow
+                    key={item.entry.id}
+                    entry={item.entry}
+                    lang={lang}
+                    t={t}
+                    icon={iconByPath.get(item.entry.category) ?? "dots"}
+                    projectName={
+                      item.entry.projectId ? (projectNameById.get(item.entry.projectId) ?? "") : ""
+                    }
+                    confirmId={confirmId}
+                    setConfirmId={setConfirmId}
+                    onEdit={onEdit}
+                    onSelect={onSelect}
+                    onRemove={remove}
+                  />
+                ),
+              )}
+            </div>
+          </div>
         )}
       </div>
 
@@ -2617,13 +2683,14 @@ function EntriesTab({
             <span>{t("ledger.entries.archivedOnly", { n: archivedRows.length })}</span>
           </div>
           <div className="overflow-hidden rounded-[7px] border border-dashed border-hairline/70 opacity-80">
-            {archivedRows.map((entry) => (
+            {archivedRows.slice(0, ARCHIVED_CAP).map((entry) => (
               <EntryRow
                 key={entry.id}
                 entry={entry}
                 lang={lang}
                 t={t}
-                categories={categories}
+                icon={iconByPath.get(entry.category) ?? "dots"}
+                projectName={entry.projectId ? (projectNameById.get(entry.projectId) ?? "") : ""}
                 confirmId={confirmId}
                 setConfirmId={setConfirmId}
                 onEdit={onEdit}
@@ -2632,6 +2699,11 @@ function EntriesTab({
               />
             ))}
           </div>
+          {archivedRows.length > ARCHIVED_CAP ? (
+            <p className="text-[11px] text-faint">
+              {t("ledger.entries.archivedTruncated", { n: ARCHIVED_CAP })}
+            </p>
+          ) : null}
         </div>
       ) : null}
 
@@ -2650,7 +2722,8 @@ function EntryRow({
   entry,
   lang,
   t,
-  categories,
+  icon,
+  projectName,
   confirmId,
   setConfirmId,
   onEdit,
@@ -2659,25 +2732,24 @@ function EntryRow({
 }: {
   entry: LedgerEntry;
   lang: Lang;
-  categories: CategoryDef[];
   t: (key: string, vars?: Record<string, string | number>) => string;
+  /** 图标和项目名由调用方查好：一行一次 find，几千行就是几千次。 */
+  icon: string;
+  projectName: string;
   confirmId: string | null;
   setConfirmId: (id: string | null) => void;
   onEdit: (entry: LedgerEntry) => void;
   onSelect: (entry: LedgerEntry) => void;
   onRemove: (id: string) => Promise<void>;
 }) {
-  // Read the project list here rather than threading it through the table: the
-  // row only needs the name of the one project it belongs to.
-  const { ledger } = useLedger();
-  const projectName = entry.projectId
-    ? (ledger?.projects ?? []).find((project) => project.id === entry.projectId)?.name ?? ""
-    : "";
+  // 高度写死，窗口化才能算准；带退款的那行金额下面多一行小字，所以高一点。
+  const tall = (entry.refundedAmount ?? 0) > 0;
   return (
     <div
       onClick={() => onSelect(entry)}
+      style={{ height: tall ? ROW_TALL_H : ROW_H }}
       className={cn(
-        "entry-row group grid cursor-pointer grid-cols-[92px_1fr_84px_96px_104px_76px] items-center gap-2 px-3 py-[7px]",
+        "entry-row group grid cursor-pointer grid-cols-[92px_1fr_84px_96px_104px_76px] items-center gap-2 px-3",
         "border-b border-hairline/40 transition-colors duration-150 last:border-b-0",
         "hover:bg-[color-mix(in_oklch,var(--surface)_75%,transparent)]",
       )}
@@ -2738,11 +2810,7 @@ function EntryRow({
         </button>
       </span>
       <span className="flex min-w-0 items-center gap-1 text-[11.5px] text-muted-foreground">
-        <CategoryIcon
-          icon={categories.find((c) => categoryPath(c) === entry.category)?.icon ?? "dots"}
-          size={11}
-          className="shrink-0 text-faint"
-        />
+        <CategoryIcon icon={icon} size={11} className="shrink-0 text-faint" />
         <span className="truncate">{entry.category.split("/").pop()}</span>
       </span>
       <span className="truncate text-[11.5px] text-faint">{entry.account || "—"}</span>
@@ -3488,7 +3556,7 @@ function RefundLinkDialog({
                     {t("ledger.refund.noCandidates")}
                   </p>
                 ) : (
-                  visible.map(({ candidate, days, sameAmount }) => {
+                  visible.slice(0, REFUND_CAP).map(({ candidate, days, sameAmount }) => {
                     const active = activeId === candidate.id;
                     return (
                       <button
@@ -3546,6 +3614,11 @@ function RefundLinkDialog({
                     );
                   })
                 )}
+                {visible.length > REFUND_CAP ? (
+                  <p className="px-3 py-2 text-center text-[11px] text-faint">
+                    {t("ledger.entries.archivedTruncated", { n: REFUND_CAP })}
+                  </p>
+                ) : null}
               </div>
             </>
           ) : (
@@ -3635,6 +3708,12 @@ function EntryDialog({
   const [note, setNote] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
 
+  // 只在「打开」和「打开的是哪一行」变化时灌表单。依赖里放 ledger 是个坑：
+  // 保存会换掉 ledger，正在编辑的表单就会被重置；后台同步落地时更糟，
+  // 用户输了一半的内容会凭空被抹掉。默认值用 ref 读，不进依赖。
+  const ledgerRef = React.useRef(ledger);
+  ledgerRef.current = ledger;
+
   React.useEffect(() => {
     if (!open) return;
     setError(null);
@@ -3653,16 +3732,17 @@ function EntryDialog({
       setDate(todayISO());
       setTime("");
       setAmount("");
+      const current = ledgerRef.current;
       setCategory(
-        (ledger?.categories.find((c) => !c.parent && c.kind !== "income")?.name as string) ??
+        (current?.categories.find((c) => !c.parent && c.kind !== "income")?.name as string) ??
           "其他",
       );
-      setAccount(ledger?.accounts[0] ?? "");
+      setAccount(current?.accounts[0] ?? "");
       setCounterparty("");
       setNote("");
       setProjectId("");
     }
-  }, [open, entry, ledger]);
+  }, [open, entry]);
 
   const save = async () => {
     const yuan = Number(amount.replace(/[^\d.]/g, ""));
@@ -3689,7 +3769,8 @@ function EntryDialog({
       if (entry) {
         await update(entry.id, input);
         // Membership is separate from the financial edit, including clearing it.
-        await setProject([entry.id], projectId);
+        // 没变就别再往返一次：那一趟要把整份账本传回来，几千条时很贵。
+        if ((entry.projectId ?? "") !== projectId) await setProject([entry.id], projectId);
       } else {
         const created = await add(input);
         // A brand-new row can already belong to a project — that is the whole

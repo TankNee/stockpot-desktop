@@ -26,13 +26,17 @@ export { countsTowardTotals, effectiveAmount, monthOf };
 /** Cents → "1,234.56". Kept separate from `formatMoney` (which deals in yuan and
  *  a display currency) because the ledger is entirely local-currency cents. */
 export function formatCents(cents: number, lang: Lang = "zh"): string {
-  const locale = lang === "en" ? "en-US" : "zh-CN";
   const abs = Math.abs(cents) / 100;
-  return abs.toLocaleString(locale, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  // 每次 toLocaleString 都会现造一个 Intl.NumberFormat，一行调两次、一屏几十行，
+  // 光格式化就要十几毫秒。格式器摊一份，按语言缓存。
+  const format = numberFormats[lang] ?? (numberFormats[lang] = new Intl.NumberFormat(
+    lang === "en" ? "en-US" : "zh-CN",
+    { minimumFractionDigits: 2, maximumFractionDigits: 2 },
+  ));
+  return format.format(abs);
 }
+
+const numberFormats: Partial<Record<Lang, Intl.NumberFormat>> = {};
 
 /** Cents → a short label for tight spaces: 850, 1.1k, 23k, 1.2m. */
 export function formatCompact(cents: number, lang: Lang = "zh"): string {

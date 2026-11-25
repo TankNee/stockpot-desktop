@@ -39,8 +39,14 @@ fn key_of(value: &Value) -> String {
 /// 本地整份文档。账本从 ledger.json 来，自选股和券商账户从 SQLite 那边来。
 pub fn local_document(app: &AppHandle) -> Value {
     let state = app.state::<AppState>();
-    let ledger = ledger::load(&state.dir);
-    let mut doc = serde_json::to_value(&ledger).unwrap_or_else(|_| json!({}));
+    // 用内存里那份，不要每次重新读盘：这个函数在自动同步的循环里每 2.5 秒调一次，
+    // 几千条账本读 + 解析一次就是十几毫秒，纯属白烧。也不先 clone 一份，
+    // 直接在锁里序列化——克隆同样要把每条账的三个字符串都复制一遍。
+    let ledger_state = app.state::<crate::ledger::LedgerState>();
+    let mut doc = {
+        let ledger = ledger_state.ledger.lock().unwrap();
+        serde_json::to_value(&*ledger).unwrap_or_else(|_| json!({}))
+    };
 
     let (stocks, accounts) = {
         let data = state.data.lock().unwrap();
@@ -139,7 +145,8 @@ pub fn apply_document(app: &AppHandle, doc: &Value) -> Result<Value, String> {
     }
     let next: ledger::Ledger = serde_json::from_value(ledger_value)
         .map_err(|error| format!("云端账本读不出来：{error}"))?;
-    ledger::save(&state.dir, &next)?;
+    // 落盘 + 换掉内存里那份。只写盘的话，下一次编辑会拿旧的内存覆盖回来。
+    app.state::<crate::ledger::LedgerState>().replace(next)?;
 
     // 2) 自选股 / 券商账户
     let stocks: Vec<crate::model::Stock> = doc

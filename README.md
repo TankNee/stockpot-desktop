@@ -233,6 +233,13 @@ for anyone who asked the system for less motion.
   and the width is remembered.
 - Scrolling uses an overlay bar: the native scrollbar is hidden so it never
   takes layout width, and a thin thumb fades in only while scrolling.
+- The entries table only renders the rows on screen. A month with a few thousand
+  rows used to mount every one of them — 600ms of blocked main thread — and every
+  click (opening the editor, saving) re-rendered the lot. Now the list keeps a
+  spacer at the full height and draws roughly one screenful plus a little
+  overscan, so switching to it costs ~10ms whether the month holds 200 rows or
+  3200. Row heights are fixed (`39px`, `44px` when a refund adds a second line)
+  so the scrollbar never drifts; `scripts/test-window.mjs` pins the maths.
 - Calendar cells are square and shade by intensity — red for spending, green for
   income, a diagonal blend when a day has both — with amounts abbreviated
   (`-3.5k`, `+18.5k`).
@@ -383,10 +390,24 @@ cd src-tauri
 cargo test                       # 40 unit tests: parsers, sessions, alerts, accounts, storage, candles
 cargo test --test live -- --ignored      # live endpoint checks (network)
 cargo test --test pipeline -- --ignored  # full quote pipeline against all four markets
+cargo test --lib < /dev/null             # 同上，但不等 stdin：有一条用例要读到 EOF 才返回
 ```
 
 The `live` and `pipeline` suites are ignored by default so CI stays offline;
 they are the guard rail when a public endpoint changes shape.
+
+The front end has two Node-only checks, both wired into `pnpm check`:
+
+```bash
+pnpm check        # tsc --noEmit + 窗口化那套纯函数的自检
+pnpm bench        # 派生逻辑的耗时（按天汇总、合计、分组、搜索过滤）
+pnpm bench:ui     # 真浏览器里量点击耗时（需要先 pnpm dev 或 pnpm preview）
+```
+
+`bench:ui` seeds 3200 entries and reports how long it takes to switch to the
+entries page, open the editor and save — the three places a slow ledger shows up
+first. On a 2026 Windows laptop the numbers went 726 / 428 / 354ms → 11 / 14 /
+14ms after the windowing change.
 
 ### Handy environment variables
 
