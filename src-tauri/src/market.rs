@@ -14,6 +14,9 @@ pub const SESSION_LUNCH: &str = "lunch";
 pub const SESSION_POST: &str = "post";
 pub const SESSION_NIGHT: &str = "night";
 pub const SESSION_WEEKEND: &str = "weekend";
+/// 场外基金不交易，净值每个交易日收盘后更新一次。用独立会话标出来，
+/// 免得界面把「净值」显示成「休市」。
+pub const SESSION_NAV: &str = "nav";
 
 fn is_weekend(date: &DateTime<Tz>) -> bool {
     matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
@@ -32,6 +35,8 @@ pub fn session(market: Market, at: DateTime<Utc>) -> &'static str {
         Market::Hk => hk_session(at),
         Market::Us => us_session(at),
         Market::Kr => kr_session(at),
+        // 净值一天一个数，没有盘中概念
+        Market::Fund => SESSION_NAV,
     }
 }
 
@@ -134,6 +139,7 @@ pub fn market_tz(market: Market) -> Tz {
         Market::A | Market::Hk => Shanghai,
         Market::Us => New_York,
         Market::Kr => Seoul,
+        Market::Fund => Shanghai,
     }
 }
 
@@ -170,6 +176,12 @@ pub fn axis(market: Market) -> Axis {
             labels: vec![(0, "04:00"), (330, "09:30"), (570, "13:30"), (720, "16:00"), (960, "20:00")],
             sessions: vec![("pre", 0, 329), ("open", 330, 719), ("post", 720, 959)],
         },
+        // 场外基金没有分时轴，调用方拿到 length 0 就不要再画图
+        Market::Fund => Axis {
+            length: 0,
+            labels: vec![],
+            sessions: vec![],
+        },
     }
 }
 
@@ -178,6 +190,7 @@ pub fn axis(market: Market) -> Axis {
 pub fn axis_index(market: Market, datetime: DateTime<Tz>) -> Option<i32> {
     let m = minutes(&datetime);
     let idx = match market {
+        Market::Fund => return None,
         Market::A => {
             // Squeeze the lunch break so 11:30 and 13:00 share one column.
             if m < 11 * 60 + 30 {
@@ -225,6 +238,7 @@ pub fn axis_index_for_time(market: Market, stamp: &str) -> Option<i32> {
         return None;
     };
     let idx = match market {
+        Market::Fund => return None,
         Market::A => {
             if minutes_of_day < 11 * 60 + 30 {
                 minutes_of_day as i32 - (9 * 60 + 30)

@@ -11,6 +11,7 @@ const marketLabel: Record<string, string> = {
   hk: "market.hk",
   us: "market.us",
   kr: "market.kr",
+  fund: "market.fund",
 };
 
 /** Symbol lookup. Results are rows you click to add; anything already on the
@@ -213,7 +214,7 @@ export function SearchView({
                         {q ? (
                           <span className="flex items-baseline gap-1">
                             <span className="num text-[9.5px] text-muted-foreground">
-                              {formatPrice(q.price)}
+                              {formatPrice(q.price, result.market)}
                             </span>
                             <span
                               className={cn(

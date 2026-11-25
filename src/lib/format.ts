@@ -9,9 +9,13 @@ export const currencySymbol: Record<string, string> = {
 };
 
 /** Two decimals above 10, three below. Matches the menu bar and rows so a
- *  price never jumps width when it crosses a round number. */
-export function formatPrice(value: number | null | undefined): string {
+ *  price never jumps width when it crosses a round number.
+ *
+ *  场外基金单位净值报价到 4 位（1.3289），3 位会把 1.3289 和 1.3294 显示成同一个数，
+ *  所以基金单独走四舍五入到 4 位的分支——只有知道市场时才能这么显示。 */
+export function formatPrice(value: number | null | undefined, market?: Market): string {
   if (value == null || !Number.isFinite(value)) return "—";
+  if (market === "fund") return value.toFixed(4);
   if (Math.abs(value) >= 10_000) return value.toFixed(0);
   if (Math.abs(value) >= 10) return value.toFixed(2);
   return value.toFixed(3);
@@ -67,6 +71,8 @@ export function convertCurrency(
         return value * rates.usdCny;
       case "kr":
         return value * (rates.usdCny / rates.usdKrw);
+      case "fund":
+        return value;
     }
   };
   const cny = toCny(amount);

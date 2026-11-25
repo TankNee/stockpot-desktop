@@ -623,6 +623,7 @@ fn market(value: &str) -> Result<Market, String> {
         "hk" => Ok(Market::Hk),
         "us" => Ok(Market::Us),
         "kr" => Ok(Market::Kr),
+        "fund" => Ok(Market::Fund),
         _ => Err("invalid-market".into()),
     }
 }

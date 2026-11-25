@@ -14,6 +14,8 @@ pub async fn intraday(
     secid: &str,
 ) -> Result<ChartData, String> {
     let series = match market {
+        // 场外基金没有分时，净值一天一个数，画折线是假的
+        Market::Fund => return Err("no-data".to_string()),
         Market::A | Market::Hk => match providers::tencent_intraday(client, id, market).await {
             Some(s) => s,
             None => providers::eastmoney_intraday(client, secid, market)

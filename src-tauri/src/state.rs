@@ -121,6 +121,12 @@ impl AppState {
             .filter(|s| s.market == Market::Kr)
             .map(|s| s.code.clone())
             .collect();
+        let fund_codes: Vec<String> = data
+            .stocks
+            .iter()
+            .filter(|s| s.market == Market::Fund)
+            .map(|s| s.code.clone())
+            .collect();
         let em_targets: Vec<(String, String, Market)> = data
             .stocks
             .iter()
@@ -128,11 +134,12 @@ impl AppState {
             .filter_map(|s| s.secid().map(|secid| (s.id.clone(), secid, s.market)))
             .collect();
 
-        let (sina_a, sina_us, tencent, tencent_kr, eastmoney) = futures::join!(
+        let (sina_a, sina_us, tencent, tencent_kr, funds, eastmoney) = futures::join!(
             providers::sina_quotes(&self.http, &a_ids, Market::A),
             providers::sina_quotes(&self.http, &us_ids, Market::Us),
             providers::tencent_hk_quotes(&self.http, &hk_codes),
             providers::tencent_kr_quotes(&self.http, &kr_codes),
+            providers::fund_quotes(&self.http, &fund_codes),
             providers::eastmoney_quotes(&self.http, &em_targets),
         );
 
@@ -171,6 +178,11 @@ impl AppState {
         for raw in tencent_kr.iter() {
             let Some(stock) = stock_by_id.get(raw.id.as_str()) else { continue };
             quotes.insert(stock.id.clone(), build_quote(raw, Market::Kr));
+        }
+
+        for raw in funds.iter() {
+            let Some(stock) = stock_by_id.get(raw.id.as_str()) else { continue };
+            quotes.insert(stock.id.clone(), build_quote(raw, Market::Fund));
         }
 
         for raw in eastmoney.iter() {
@@ -407,15 +419,7 @@ impl AppState {
         let now = Utc::now();
         let sessions: HashMap<&str, &str> = Market::all()
             .iter()
-            .map(|m| {
-                let key = match m {
-                    Market::A => "a",
-                    Market::Hk => "hk",
-                    Market::Us => "us",
-                    Market::Kr => "kr",
-                };
-                (key, market::session(*m, now))
-            })
+            .map(|m| (m.key(), market::session(*m, now)))
             .collect();
         serde_json::json!({
             "data": data,

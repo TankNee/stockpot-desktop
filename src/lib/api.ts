@@ -27,6 +27,7 @@ const demoQuotes: Record<
   usr_rklb: { name: "Rocket Lab", price: 78.59, change: 7.28, extended: 74.75, extLabel: "night" },
   usr_tsm: { name: "台积电", price: 345.98, change: 6.71, extended: 346.2, extLabel: "night" },
   kr_005930: { name: "三星电子", price: 199700, change: 9800 },
+  fund005827: { name: "易方达蓝筹精选混合", price: 1.3289, change: -0.0068 },
 };
 
 function nowMinus(seconds: number): string {
@@ -54,6 +55,8 @@ const demoData: AppPayload = {
       { id: "usr_tsm", code: "TSM", name: "台积电", market: "us" },
       { id: "usr_aapl", code: "AAPL", name: "苹果", market: "us" },
       { id: "kr_005930", code: "005930", name: "三星电子", market: "kr" },
+      // 场外基金：6 位代码和 A 股同号，id 必须带 fund 前缀
+      { id: "fund005827", code: "005827", name: "易方达蓝筹精选混合", market: "fund" },
     ],
     settings: {
       menuBarMode: "stock",
@@ -88,6 +91,8 @@ const demoData: AppPayload = {
           hk03690: { costPrice: 71.2, shares: 300 },
           usr_rklb: { costPrice: 42.1, shares: 40 },
           usr_aapl: { costPrice: 310.0, shares: 8 },
+          // 份额是小数，股票那套整数输入框在这里会丢精度
+          fund005827: { costPrice: 1.42, shares: 12345.67 },
         },
       },
       {
@@ -107,7 +112,7 @@ const demoData: AppPayload = {
     updatedAt: Math.floor(Date.now() / 1000),
     quotes: {},
   },
-  sessions: { a: "open", hk: "open", us: "post", kr: "open" },
+  sessions: { a: "open", hk: "open", us: "post", kr: "open", fund: "nav" },
   trayLabel: "贵州茅台 1437.51 -0.52%",
   dataFile: "~/Library/Application Support/com.stockpot.app/stockpot.json",
 };
@@ -172,7 +177,14 @@ function hydrateQuotes(): void {
       changePercent: (seed.change / prev) * 100,
       prevClose: prev,
       time: nowMinus(18),
-      currency: stock.market === "a" ? "CNY" : stock.market === "hk" ? "HKD" : stock.market === "us" ? "USD" : "KRW",
+      currency:
+        stock.market === "hk"
+          ? "HKD"
+          : stock.market === "us"
+            ? "USD"
+            : stock.market === "kr"
+              ? "KRW"
+              : "CNY",
       extendedPrice: seed.extended,
       extendedChangePercent: seed.extended ? ((seed.extended - seed.price) / seed.price) * 100 : undefined,
       extendedLabel: seed.extLabel,

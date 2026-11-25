@@ -292,7 +292,7 @@ function StockRow({
         }
       }}
       tabIndex={isFirst ? 0 : -1}
-      aria-label={`${stock.name} ${formatPrice(quote?.price)} ${formatPercent(quote?.changePercent)}`}
+      aria-label={`${stock.name} ${formatPrice(quote?.price, stock.market)} ${formatPercent(quote?.changePercent)}`}
     >
       {manual ? (
         <div className="flex shrink-0 flex-col gap-[1px] opacity-40 transition-opacity group-hover:opacity-100">
@@ -355,7 +355,7 @@ function StockRow({
               flash === "down" && "tick-flash-down",
             )}
           >
-            {formatPrice(quote?.price)}
+            {formatPrice(quote?.price, stock.market)}
           </span>
           <span
             className={cn(

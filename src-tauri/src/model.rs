@@ -8,6 +8,9 @@ pub enum Market {
     Hk,
     Us,
     Kr,
+    /// 场外开放式基金。6 位代码和 A 股同号（000001 既是平安银行也是华夏成长），
+    /// 所以 id 必须自带 `fund` 前缀，不能靠代码猜。
+    Fund,
 }
 
 impl Market {
@@ -17,20 +20,22 @@ impl Market {
             Market::Hk => "HKD",
             Market::Us => "USD",
             Market::Kr => "KRW",
+            Market::Fund => "CNY",
         }
     }
 
-    pub fn all() -> [Market; 4] {
-        [Market::A, Market::Hk, Market::Us, Market::Kr]
+    pub fn all() -> [Market; 5] {
+        [Market::A, Market::Hk, Market::Us, Market::Kr, Market::Fund]
     }
 
-    /// Short key used on the wire (`a`, `hk`, `us`, `kr`).
+    /// Short key used on the wire (`a`, `hk`, `us`, `kr`, `fund`).
     pub fn key(self) -> &'static str {
         match self {
             Market::A => "a",
             Market::Hk => "hk",
             Market::Us => "us",
             Market::Kr => "kr",
+            Market::Fund => "fund",
         }
     }
 }
@@ -97,6 +102,10 @@ pub struct Stock {
 
 impl Stock {
     pub fn secid(&self) -> Option<String> {
+        // 场外基金不走东财 push2，哪怕搜索时存了 QuoteID 也不要拿它去请求行情
+        if self.market == Market::Fund {
+            return None;
+        }
         if let Some(s) = &self.secid
             && !s.is_empty()
         {
@@ -118,6 +127,8 @@ impl Stock {
             Market::Hk => Some(format!("116.{}", self.code)),
             Market::Us => Some(format!("105.{}", self.code.replace('.', "_"))),
             Market::Kr => Some(format!("177.{}", self.code)),
+            // 场外基金不走东财 push2 行情，净值另有接口，secid 没有意义
+            Market::Fund => None,
         }
     }
 }
@@ -433,6 +444,7 @@ impl Rates {
             Market::Hk => amount * (self.usd_cny / self.usd_hkd),
             Market::Us => amount * self.usd_cny,
             Market::Kr => amount * (self.usd_cny / self.usd_krw),
+            Market::Fund => amount,
         }
     }
 

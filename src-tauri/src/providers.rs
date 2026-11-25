@@ -471,6 +471,99 @@ pub fn parse_eastmoney_quotes(
     out
 }
 
+/// 场外基金净值。东财移动端接口一次能带一批代码：
+/// `Datas[{FCODE, SHORTNAME, PDATE, NAV, NAVCHGRT, GSZ, GSZZL, GZTIME}]`。
+///
+/// `NAV` 是最近一个交易日的单位净值，`GSZ` 只有盘中（约 09:30–15:00）才有估值。
+/// 收盘后 GSZ 为空，这时用 `NAVCHGRT`（净值日涨跌%）反推昨净值，
+/// 否则界面上今天涨了 1% 也会显示成 0。
+pub async fn fund_quotes(client: &Client, codes: &[String]) -> Vec<RawQuote> {
+    if codes.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<RawQuote> = Vec::new();
+    for chunk in codes.chunks(40) {
+        let url = format!(
+            "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo?Fcodes={}&pageIndex=1&pageSize={}&plat=Android&appType=ttjj&product=EFund&Version=1&deviceid=1",
+            chunk.join(","),
+            chunk.len()
+        );
+        let Ok(res) = client
+            .get(&url)
+            .header("Referer", "https://fund.eastmoney.com/")
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let Ok(body) = res.text().await else {
+            continue;
+        };
+        out.extend(parse_fund_quotes(&body));
+    }
+    out
+}
+
+fn json_num(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        serde_json::Value::Number(n) => n.as_f64(),
+        _ => None,
+    }
+}
+
+pub fn parse_fund_quotes(body: &str) -> Vec<RawQuote> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(rows) = root.get("Datas").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(code) = row.get("FCODE").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(nav) = json_num(row.get("NAV")).filter(|v| *v > 0.0) else {
+            continue;
+        };
+        let gsz = json_num(row.get("GSZ")).filter(|v| *v > 0.0);
+        let pct = json_num(row.get("NAVCHGRT"));
+        let (price, prev_close) = match gsz {
+            Some(estimate) => (estimate, nav),
+            None => {
+                let prev = match pct {
+                    Some(p) if p > -100.0 => nav * 100.0 / (100.0 + p),
+                    _ => nav,
+                };
+                (nav, prev)
+            }
+        };
+        let name = row
+            .get("SHORTNAME")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let time = row
+            .get("GZTIME")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| row.get("PDATE").and_then(|v| v.as_str()))
+            .unwrap_or_default()
+            .to_string();
+        out.push(RawQuote {
+            id: format!("fund{code}"),
+            name,
+            price,
+            prev_close,
+            time,
+            market: Market::Fund,
+            extended_price: None,
+        });
+    }
+    out
+}
+
 /// Quotes for an arbitrary set of stocks: one request per market, merged in the
 /// order A, US, HK, KR, then the Eastmoney fallback for anything carrying a
 /// `secid`. The GUI's preview and the CLI's `market.quotes` both land in the
@@ -496,15 +589,21 @@ pub async fn quotes(client: &Client, stocks: &[crate::model::Stock]) -> Vec<RawQ
         .filter(|s| s.market == Market::Kr)
         .map(|s| s.code.clone())
         .collect();
+    let fund_codes: Vec<String> = stocks
+        .iter()
+        .filter(|s| s.market == Market::Fund)
+        .map(|s| s.code.clone())
+        .collect();
     let em_targets: Vec<(String, String, Market)> = stocks
         .iter()
         .filter_map(|s| s.secid().map(|secid| (s.id.clone(), secid, s.market)))
         .collect();
-    let (sina_a, sina_us, hk, kr, em) = futures::join!(
+    let (sina_a, sina_us, hk, kr, fund, em) = futures::join!(
         sina_quotes(client, &a_ids, Market::A),
         sina_quotes(client, &us_ids, Market::Us),
         tencent_hk_quotes(client, &hk_codes),
         tencent_kr_quotes(client, &kr_codes),
+        fund_quotes(client, &fund_codes),
         eastmoney_quotes(client, &em_targets),
     );
     let mut out: Vec<RawQuote> = Vec::new();
@@ -513,6 +612,7 @@ pub async fn quotes(client: &Client, stocks: &[crate::model::Stock]) -> Vec<RawQ
         .chain(sina_us)
         .chain(hk)
         .chain(kr)
+        .chain(fund)
         .chain(em)
     {
         // The first feed with a real price wins; Eastmoney is the fallback.
@@ -749,9 +849,11 @@ pub fn parse_eastmoney_search(body: &str) -> Vec<crate::model::SearchResult> {
         };
         let classify = row.classify.unwrap_or_default();
         let kind = row.kind.unwrap_or_default();
-        // Only equities and ETFs; ignore bonds, indices, warrants.
+        // 场外基金（OTCFUND）和场内 ETF/LOF（Classify=Fund，2 开头的是深市）
+        // 是两回事：前者按净值申赎、没有分时，后者就是能交易的 A 股。
         let is_fund = kind.contains("基金");
         let market = match classify.as_str() {
+            "OTCFUND" => Market::Fund,
             "AStock" | "NEEQ" => Market::A,
             "HK" => Market::Hk,
             "UsStock" => Market::Us,
@@ -759,6 +861,9 @@ pub fn parse_eastmoney_search(body: &str) -> Vec<crate::model::SearchResult> {
             _ if is_fund => Market::A,
             _ => continue,
         };
+        if market == Market::Fund && (code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit())) {
+            continue;
+        }
         if market == Market::Hk && code.len() != 5 {
             continue;
         }
@@ -781,6 +886,7 @@ pub fn parse_eastmoney_search(body: &str) -> Vec<crate::model::SearchResult> {
             Market::Hk => format!("hk{code}"),
             Market::Us => format!("usr_{}", code.to_lowercase().replace('.', "_")),
             Market::Kr => format!("kr_{code}"),
+            Market::Fund => format!("fund{code}"),
         };
         let display_code = match market {
             Market::Us => code.clone(),
@@ -943,6 +1049,8 @@ fn eastmoney_axis_index(market: Market, date: &str, time: &str) -> Option<i32> {
             let t = chrono_tz::America::New_York.from_local_datetime(&dt).single()?;
             crate::market::axis_index(market, t)
         }
+        // 场外基金没有分时轴
+        Market::Fund => None,
     }
 }
 
@@ -1032,6 +1140,67 @@ mod tests {
         assert_eq!(results[1].id, "kr_005930");
         assert_eq!(results[2].id, "hk00700");
         assert_eq!(results[3].id, "sh600000");
+    }
+
+    #[test]
+    fn parses_otc_fund_search_as_its_own_market() {
+        let body = r#"{"QuotationCodeTable":{"Data":[
+            {"Code":"005827","Name":"易方达蓝筹精选混合","QuoteID":"150.005827","Classify":"OTCFUND","SecurityTypeName":"基金"},
+            {"Code":"510300","Name":"沪深300ETF华泰柏瑞","QuoteID":"1.510300","Classify":"Fund","SecurityTypeName":"基金"},
+            {"Code":"000001","Name":"平安银行","QuoteID":"0.000001","Classify":"AStock","SecurityTypeName":"深A"}
+        ],"Status":0}}"#;
+        let results = parse_eastmoney_search(body);
+        assert_eq!(results.len(), 3);
+        // 场外基金必须走自己的 id，否则会和同号的平安银行撞车
+        assert_eq!(results[0].market, Market::Fund);
+        assert_eq!(results[0].id, "fund005827");
+        // 场内 ETF 还能交易，仍按 A 股处理
+        assert_eq!(results[1].market, Market::A);
+        assert_eq!(results[1].id, "sh510300");
+        assert_eq!(results[2].id, "sz000001");
+    }
+
+    #[test]
+    fn parses_fund_nav_with_estimate() {
+        // 盘中：GSZ 有估值，昨收就是最近一个交易日净值
+        let body = r#"{"Datas":[{"FCODE":"005827","SHORTNAME":"易方达蓝筹精选混合","PDATE":"2026-11-24","NAV":"1.3289","NAVCHGRT":"-0.51","GSZ":"1.3412","GSZZL":"0.93","GZTIME":"2026-11-25 14:30"}],"ErrCode":0}"#;
+        let quotes = parse_fund_quotes(body);
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].id, "fund005827");
+        assert_eq!(quotes[0].market, Market::Fund);
+        assert!((quotes[0].price - 1.3412).abs() < 1e-9);
+        assert!((quotes[0].prev_close - 1.3289).abs() < 1e-9);
+        assert_eq!(quotes[0].time, "2026-11-25 14:30");
+    }
+
+    #[test]
+    fn parses_fund_nav_after_close() {
+        // 收盘后 GSZ 为空：用净值涨跌% 反推昨净值，界面才不会把今天的涨跌显示成 0
+        let body = r#"{"Datas":[{"FCODE":"005827","SHORTNAME":"易方达蓝筹精选混合","PDATE":"2026-11-25","NAV":"1.3289","NAVCHGRT":"-0.51","GSZ":null,"GSZZL":null,"GZTIME":null}],"ErrCode":0}"#;
+        let quotes = parse_fund_quotes(body);
+        assert_eq!(quotes.len(), 1);
+        assert!((quotes[0].price - 1.3289).abs() < 1e-9);
+        let pct = (quotes[0].price - quotes[0].prev_close) / quotes[0].prev_close * 100.0;
+        assert!((pct + 0.51).abs() < 0.01, "change percent was {pct}");
+        assert_eq!(quotes[0].time, "2026-11-25");
+    }
+
+    /// 真接口冒烟：默认跳过（CI 不该依赖外网），手动 `cargo test --lib live -- --ignored` 跑。
+    /// 它验证的不只是解析，还有「只传代码、不传 secid」这条基金专用路径。
+    #[tokio::test]
+    #[ignore]
+    async fn live_fund_quotes_return_net_value() {
+        let client = reqwest::Client::new();
+        let codes = vec!["005827".to_string(), "000001".to_string()];
+        let quotes = fund_quotes(&client, &codes).await;
+        assert_eq!(quotes.len(), 2, "两个代码都该有净值");
+        for quote in &quotes {
+            assert_eq!(quote.market, Market::Fund);
+            assert!(quote.price > 0.1 && quote.price < 20.0, "净值 {}", quote.price);
+            assert!(quote.prev_close > 0.0, "昨净值不能是 0，涨跌会变成 inf");
+        }
+        // 000001 在基金里是华夏成长混合，不是平安银行
+        assert!(quotes.iter().any(|q| q.id == "fund000001"));
     }
 
     #[test]

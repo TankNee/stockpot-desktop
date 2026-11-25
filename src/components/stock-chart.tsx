@@ -68,6 +68,7 @@ function buildPlot(data: ChartData, width: number, height: number, schemeUp: boo
 
 export function StockChart({ stock }: { stock: Stock }) {
   const { t, loadChart, quotes, settings, loadKline } = useStore();
+  const isFund = stock.market === "fund";
   const [period, setPeriod] = React.useState<Period | "intraday">("intraday");
   const [data, setData] = React.useState<ChartData | null>(null);
   const [status, setStatus] = React.useState<"loading" | "ready" | "error">("loading");
@@ -88,6 +89,8 @@ export function StockChart({ stock }: { stock: Stock }) {
   const [klineNote, setKlineNote] = React.useState<string | null>(null);
 
   const load = React.useCallback(() => {
+    // 场外基金没有分时，净值一天一个数，不去打那个接口
+    if (isFund) return;
     setStatus("loading");
     loadChart(stock.id)
       .then((d) => {
@@ -95,14 +98,14 @@ export function StockChart({ stock }: { stock: Stock }) {
         setStatus(d.points.length > 0 ? "ready" : "error");
       })
       .catch(() => setStatus("error"));
-  }, [loadChart, stock.id]);
+  }, [loadChart, stock.id, isFund]);
 
   React.useEffect(load, [load]);
 
   // Bars are fetched lazily: the intraday view is the default and most visits
   // never look at a weekly chart.
   React.useEffect(() => {
-    if (period === "intraday") return;
+    if (period === "intraday" || isFund) return;
     let alive = true;
     setKlineStatus("loading");
     loadKline(stock.id, period)
@@ -226,6 +229,44 @@ export function StockChart({ stock }: { stock: Stock }) {
       last: data.points[data.points.length - 1].price,
     };
   }, [data]);
+
+  // 场外基金：只报净值和涨跌，没有分时/K 线可画。
+  if (isFund) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex items-end justify-between gap-2 px-3 pb-1.5">
+          <div className="flex flex-col gap-[2px]">
+            <span className="eyebrow leading-none">{t("chart.title")}</span>
+            <span className="num text-[9.5px] leading-none text-faint">
+              {quote?.time ? shortStamp(quote.time) : t("chart.loading")}
+            </span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span
+              className={cn(
+                "num text-[17px] font-medium leading-none",
+                rising ? "text-up" : "text-down",
+              )}
+            >
+              {formatPrice(quote?.price, "fund")}
+            </span>
+            <span
+              className={cn(
+                "num text-[10.5px] leading-tight",
+                rising ? "text-up" : "text-down",
+              )}
+            >
+              {formatPercent(quote?.changePercent)}
+            </span>
+          </div>
+        </div>
+        <div className="mx-2 mb-2 flex flex-1 flex-col items-center justify-center gap-2 rounded-[6px] border border-hairline/70 bg-surface/45 px-6 text-center">
+          <span className="text-[11px] text-muted-foreground">{t("chart.fundNote")}</span>
+          <span className="text-[10px] text-faint">{t("chart.fundNoteHint")}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

@@ -708,7 +708,7 @@ function AccountPositions({
                                 : "",
                           )}
                         >
-                          {formatPrice(quote?.price)}
+                          {formatPrice(quote?.price, stock.market)}
                         </span>
                         <span className="num text-[10px] text-faint">
                           {formatPercent(quote?.changePercent)}
@@ -758,7 +758,7 @@ function AccountPositions({
                       {merged ? (
                         <div className="flex flex-col items-end leading-tight">
                           <span className="num text-muted-foreground">
-                            {formatPrice(merged.costPrice)}
+                            {formatPrice(merged.costPrice, stock.market)}
                           </span>
                           <span className="num text-[10px] text-faint">
                             ×{merged.shares.toLocaleString("en-US")}
@@ -1121,7 +1121,7 @@ function StocksTab() {
                         </div>
                       </td>
                       <td className="px-2 py-2 text-right">
-                        <span className="num">{formatPrice(quote?.price)}</span>
+                        <span className="num">{formatPrice(quote?.price, stock.market)}</span>
                         <span
                           className={cn(
                             "num ml-2 text-[11px]",

@@ -1,5 +1,14 @@
-export type Market = "a" | "hk" | "us" | "kr";
-export type SessionKey = "pre" | "open" | "lunch" | "post" | "night" | "closed" | "weekend";
+export type Market = "a" | "hk" | "us" | "kr" | "fund";
+export type SessionKey =
+  | "pre"
+  | "open"
+  | "lunch"
+  | "post"
+  | "night"
+  | "closed"
+  | "weekend"
+  /** 场外基金：净值每个交易日更新一次，没有盘中 */
+  | "nav";
 export type ColorScheme = "chinese" | "western";
 export type Theme = "system" | "light" | "dark";
 export type Lang = "zh" | "en" | "ja";
@@ -165,7 +174,7 @@ export interface SearchResult {
   secid: string;
 }
 
-export const MARKET_ORDER: Market[] = ["a", "hk", "us", "kr"];
+export const MARKET_ORDER: Market[] = ["a", "hk", "us", "kr", "fund"];
 
 /** One agent skill document shipped with the app (`skills/<name>/SKILL.md`). */
 export interface AgentSkill {

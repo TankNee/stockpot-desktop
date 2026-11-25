@@ -143,7 +143,7 @@ export function EditStockDialog({
                 <DialogTitle className="truncate">{stock.name}</DialogTitle>
                 <DialogDescription className="num mt-0.5 text-[10px] uppercase tracking-[0.06em]">
                   {stock.code} · {t(`market.${stock.market}`)}
-                  {quote ? ` · ${formatPrice(quote.price)}` : ""}
+                  {quote ? ` · ${formatPrice(quote.price, stock.market)}` : ""}
                 </DialogDescription>
               </div>
               {quote ? (
@@ -168,7 +168,7 @@ export function EditStockDialog({
                     <span className="num text-[9.5px] text-faint">
                       {t("edit.mergedAt", {
                         shares: merged.shares,
-                        price: formatPrice(merged.costPrice),
+                        price: formatPrice(merged.costPrice, stock.market),
                       })}
                     </span>
                   ) : null}
@@ -194,7 +194,7 @@ export function EditStockDialog({
                           <span className="num text-[9px] text-faint">
                             {filled ? (
                               <>
-                                {formatPrice(Number(draft.cost))} × {draft.shares}
+                                {formatPrice(Number(draft.cost), stock.market)} × {draft.shares}
                               </>
                             ) : (
                               t("edit.accountEmpty")
@@ -314,7 +314,7 @@ export function EditStockDialog({
                 <p className="text-[10px] leading-snug text-faint">
                   {direction && quote
                     ? t("edit.alertHint", {
-                        price: formatPrice(quote.price),
+                        price: formatPrice(quote.price, stock.market),
                         direction,
                       })
                     : t("edit.alertNeedTarget")}

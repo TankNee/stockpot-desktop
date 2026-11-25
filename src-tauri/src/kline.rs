@@ -221,6 +221,8 @@ pub fn secid_for(stock: &crate::model::Stock) -> String {
         Market::Hk => format!("116.{}", stock.code),
         Market::Us => format!("105.{}", stock.code.replace('.', "_")),
         Market::Kr => format!("177.{}", stock.code),
+        // 场外基金没有 K 线；调用方会用 secid 为空来判短，这里给个空串
+        Market::Fund => String::new(),
     })
 }
 

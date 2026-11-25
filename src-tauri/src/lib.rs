@@ -460,13 +460,19 @@ async fn preview_quotes(app: AppHandle, ids: Vec<String>) -> Result<serde_json::
         .filter(|s| s.market == Market::Kr)
         .map(|s| s.code.clone())
         .collect();
+    let fund_codes: Vec<String> = wanted
+        .iter()
+        .filter(|s| s.market == Market::Fund)
+        .map(|s| s.code.clone())
+        .collect();
     let em_targets: Vec<(String, String, Market)> = Vec::new();
 
-    let (sina_a, sina_us, tencent, tencent_kr, eastmoney) = futures::join!(
+    let (sina_a, sina_us, tencent, tencent_kr, funds, eastmoney) = futures::join!(
         providers::sina_quotes(&client, &a_ids, Market::A),
         providers::sina_quotes(&client, &us_ids, Market::Us),
         providers::tencent_hk_quotes(&client, &hk_codes),
         providers::tencent_kr_quotes(&client, &kr_codes),
+        providers::fund_quotes(&client, &fund_codes),
         providers::eastmoney_quotes(&client, &em_targets),
     );
     let mut fetched: std::collections::HashMap<String, Quote> = std::collections::HashMap::new();
@@ -475,6 +481,7 @@ async fn preview_quotes(app: AppHandle, ids: Vec<String>) -> Result<serde_json::
         .chain(sina_us.iter())
         .chain(tencent.iter())
         .chain(tencent_kr.iter())
+        .chain(funds.iter())
     {
         let Some(stock) = wanted.iter().find(|s| s.id == raw.id) else {
             continue;
@@ -555,6 +562,9 @@ pub(crate) fn synthetic_stock(id: &str) -> Stock {
         (Market::Us, rest.replace('_', ".").to_uppercase())
     } else if let Some(rest) = id.strip_prefix("kr_") {
         (Market::Kr, rest.to_string())
+    } else if let Some(rest) = id.strip_prefix("fund") {
+        // 场外基金 id 带 fund 前缀，代码本身是纯 6 位数字，不能靠首字母猜
+        (Market::Fund, rest.to_string())
     } else {
         (
             Market::A,
@@ -928,6 +938,10 @@ async fn kline(app: AppHandle, id: String, period: String) -> Result<KlineData, 
     let Some(stock) = stock else {
         return Err("unknown-stock".into());
     };
+    // 场外基金没有 K 线，前端据此显示「净值每个交易日更新」
+    if stock.market == Market::Fund {
+        return Err("no-data".into());
+    }
     let Some(period) = kline::Period::parse(&period) else {
         return Err("bad-period".into());
     };
@@ -1751,14 +1765,8 @@ fn sessions_now() -> serde_json::Value {
     let now = chrono::Utc::now();
     let mut map = serde_json::Map::new();
     for market in Market::all() {
-        let key = match market {
-            Market::A => "a",
-            Market::Hk => "hk",
-            Market::Us => "us",
-            Market::Kr => "kr",
-        };
         map.insert(
-            key.into(),
+            market.key().into(),
             serde_json::json!(market::session(market, now)),
         );
     }
