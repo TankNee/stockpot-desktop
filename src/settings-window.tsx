@@ -2926,7 +2926,7 @@ function AccountPanel() {
 function UpdatePanel() {
   const { t, settings, updateSettings } = useStore();
   const [status, setStatus] = React.useState<
-    "idle" | "checking" | "latest" | "found" | "downloading" | "failed"
+    "idle" | "checking" | "latest" | "found" | "downloading" | "installing" | "failed"
   >("idle");
   const [found, setFound] = React.useState("");
   const [progress, setProgress] = React.useState(0);
@@ -2968,14 +2968,17 @@ function UpdatePanel() {
     setStatus("downloading");
     setProgress(0);
     try {
-      await call<boolean>("install_update");
-      // 装完应用会自己重启，走到这儿一般是没找到更新
-      setStatus("latest");
+      const installed = await call<boolean>("install_update");
+      // 真正装完，macOS 上车自己重启、Windows 交给安装器接管，都走不到下一行；
+      // 能回来只说明这一次没找到更新，别拿「已是最新」盖过去
+      setStatus(installed ? "installing" : "latest");
     } catch (e) {
       setStatus("failed");
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  const pct = Math.round(progress * 100);
 
   const hint = (() => {
     switch (status) {
@@ -2986,7 +2989,11 @@ function UpdatePanel() {
       case "found":
         return t("update.found", { version: found });
       case "downloading":
-        return t("update.downloading", { pct: Math.round(progress * 100) });
+        return pct > 0
+          ? t("update.downloading", { pct })
+          : t("update.downloadingUnknown");
+      case "installing":
+        return t("update.installing");
       case "failed":
         return t("update.failed", { error });
       default:
@@ -2994,7 +3001,7 @@ function UpdatePanel() {
     }
   })();
 
-  const busy = status === "checking" || status === "downloading";
+  const busy = status === "checking" || status === "downloading" || status === "installing";
 
   return (
     <Section title={t("update.title")}>
@@ -3033,8 +3040,12 @@ function UpdatePanel() {
             disabled={busy}
             onClick={() => void (status === "found" ? installNow() : checkNow())}
           >
-            {status === "downloading"
-              ? t("update.downloading", { pct: Math.round(progress * 100) })
+            {status === "downloading" || status === "installing"
+              ? status === "installing"
+                ? t("update.installing")
+                : pct > 0
+                  ? t("update.downloading", { pct })
+                  : t("update.downloadingUnknown")
               : status === "found"
                 ? t("update.install")
                 : t("update.check")}

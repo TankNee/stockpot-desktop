@@ -55,10 +55,11 @@ function Initialize-Msvc {
 }
 
 function Complete-WindowsSdk {
-    # vcvars64.bat 查 SDK 路径靠的是 reg.exe 读注册表。如果调用方（比如沙箱里的 agent）
-    # 把 reg.exe 拦了，vcvars 不会报错，只是 INCLUDE/LIB 里少了 Windows Kits 那几条，
-    # 于是第一次碰到 #include <windows.h> 才炸，报的还是 cl 的 exit code 2、没有别的线索。
-    # 这里按目录自己补上，正常环境走不到。
+    # vcvars64.bat reads the SDK paths out of the registry through reg.exe. When the
+    # caller blocks reg.exe (a sandboxed agent, for one), vcvars does not fail - it just
+    # leaves the Windows Kits entries out of INCLUDE/LIB, and the build only dies at the
+    # first #include <windows.h>, as a bare cl.exe exit code 2 with nothing else to go on.
+    # Fill them in from the directory layout instead; a normal shell never gets here.
     if ($env:INCLUDE -like '*Windows Kits*') { return }
 
     $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
@@ -82,7 +83,7 @@ function Complete-WindowsSdk {
     ) | Where-Object { Test-Path $_ }
 
     if ($includeExtra) {
-        Write-Host "[Stockpot] vcvars 没拿到 SDK 路径，按目录补上：$($version.Name)" -ForegroundColor DarkGray
+        Write-Host "[Stockpot] vcvars missed the SDK paths; adding Windows Kits $($version.Name) by hand" -ForegroundColor DarkGray
         $env:INCLUDE = ($includeExtra + $env:INCLUDE) -join ';'
         $env:LIB = ($libExtra + $env:LIB) -join ';'
     }

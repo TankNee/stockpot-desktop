@@ -328,19 +328,29 @@ async fn install_update(app: AppHandle) -> Result<bool, String> {
         return Ok(false);
     };
 
+    // 进度回调给的是「这一块多大」，不是累计值；自己加，否则前端拿 chunk/total 永远是 0%
     let handle = app.clone();
+    let mut received: u64 = 0;
     update
         .download_and_install(
             move |chunk, total| {
+                received += chunk as u64;
                 let _ = handle.emit(
                     "update-progress",
-                    serde_json::json!({ "chunk": chunk, "total": total }),
+                    serde_json::json!({ "chunk": received, "total": total }),
                 );
             },
             || {},
         )
         .await
         .map_err(|error| format!("安装失败：{error}"))?;
+
+    // macOS / Linux 这边装完只是把新 app 换到磁盘上，跑着的还是旧进程：
+    // 不重启的话版本号一直是旧的，用户会看到「检查到更新 → 下载 → 已是最新」死循环。
+    // Windows 的安装器会自己接管进程并退出，走不到这儿。
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        app.restart();
+    }
     Ok(true)
 }
 
