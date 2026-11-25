@@ -118,7 +118,15 @@ switch ($Command) {
     }
     'tauri-build' {
         Push-Location $root
-        try { & pnpm tauri build @Extra } finally { Pop-Location }
+        # pnpm 和 tauri 会把进度、解包日志写到 stderr。PowerShell 5.1 在
+        # $ErrorActionPreference='Stop' 下把任何原生 stderr 当成致命错误，
+        # 构建会在第一条日志处中断、管道里的输出也一起丢掉。这里单独放宽。
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & pnpm tauri build @Extra } finally {
+            $ErrorActionPreference = $prev
+            Pop-Location
+        }
     }
     'check' { & cargo check --manifest-path (Join-Path $tauriDir 'Cargo.toml') --all-targets @Extra }
     'build' { & cargo build --manifest-path (Join-Path $tauriDir 'Cargo.toml') @Extra }
