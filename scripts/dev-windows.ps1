@@ -121,10 +121,11 @@ switch ($Command) {
         # pnpm 和 tauri 会把进度、解包日志写到 stderr。PowerShell 5.1 在
         # $ErrorActionPreference='Stop' 下把任何原生 stderr 当成致命错误，
         # 构建会在第一条日志处中断、管道里的输出也一起丢掉。这里单独放宽。
-        $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try { & pnpm tauri build @Extra } finally {
-            $ErrorActionPreference = $prev
+            # 这里不能用 $prev：PS 5.1 在 finally 里读它会是 $null，
+            # 赋值时抛「无法将 Null 转换为 ActionPreference」，命令白跑成 exit 1。
+            $ErrorActionPreference = 'Stop'
             Pop-Location
         }
     }
