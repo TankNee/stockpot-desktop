@@ -36,9 +36,11 @@ import {
 import { SearchView } from "@/components/search-view";
 import { ledgerApi } from "@/ledger/api";
 import {
-  CATEGORY_ICON_KEYS,
   CategoryIcon,
+  CategoryIconPicker,
+  categoryIconKey,
   categoryPath,
+  guessCategoryIcon,
   orderedCategories,
 } from "@/ledger/categories";
 import type { Ledger } from "@/ledger/types";
@@ -1937,7 +1939,7 @@ function CategoryDescriptionEditor() {
                 <button type="button" aria-label={t("settings.ledger.aiToggle", { name: group.name })} aria-expanded={!isCollapsed} onClick={() => setCollapsed((prev) => ({ ...prev, [group.name]: !prev[group.name] }))} className="flex size-5 items-center justify-center rounded-[3px] text-muted-foreground hover:bg-surface">
                   {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                 </button>
-                <CategoryIcon icon={group.icon} size={12} className="text-muted-foreground" />
+                <CategoryIcon icon={categoryIconKey(group)} size={12} className="text-muted-foreground" />
                 <span className="flex-1 text-[12px] font-medium">{group.name}</span>
                 <span className="num text-[10px] text-faint">{children.length}</span>
               </div>
@@ -1949,7 +1951,7 @@ function CategoryDescriptionEditor() {
                     return (
                       <div key={path} className={cn("flex flex-col gap-1 rounded-[4px] px-2 py-1.5", def.parent && "ml-5 border-l border-hairline/60")}>
                         <div className="flex items-center gap-2 text-[11.5px]">
-                          <CategoryIcon icon={def.icon} size={11} className="text-muted-foreground" />
+                          <CategoryIcon icon={categoryIconKey(def)} size={11} className="text-muted-foreground" />
                           <span className="min-w-0 flex-1 truncate">{def.name}</span>
                           <Button variant="ghost" size="sm" className="h-[22px] px-1.5 text-[10px]" onClick={() => void ledgerApi.updateCategory({ name: def.name, parent: def.parent, newName: def.name, newParent: def.parent, icon: def.icon, kind: def.kind, description }).then(setLedger).catch((err: unknown) => setError(String(err)))}>
                             <Check size={10} strokeWidth={2.6} />
@@ -1978,7 +1980,9 @@ function LedgerSettingsTab() {
   const [name, setName] = React.useState("");
   const [parent, setParent] = React.useState("");
   const [kind, setKind] = React.useState<"" | "expense" | "income">("");
-  const [icon, setIcon] = React.useState("dots");
+  const [icon, setIcon] = React.useState("");
+  /** 用户有没有亲自挑过图标；没挑就跟分类名自动配的那个走 */
+  const [iconTouched, setIconTouched] = React.useState(false);
   const [description, setDescription] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [clearing, setClearing] = React.useState(false);
@@ -2047,7 +2051,8 @@ function LedgerSettingsTab() {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
-      setLedger(await ledgerApi.addCategory(trimmed, parent, icon, kind, description));
+      const picked = iconTouched ? icon : icon || guessCategoryIcon(trimmed);
+      setLedger(await ledgerApi.addCategory(trimmed, parent, picked, kind, description));
       setName("");
       setDescription("");
       setError(null);
@@ -2096,23 +2101,14 @@ function LedgerSettingsTab() {
             <option value="expense">{t("ledger.kind.expense")}</option>
             <option value="income">{t("ledger.kind.income")}</option>
           </select>
-          <span className="flex items-center gap-1">
-            <span className="flex h-[27px] w-[27px] items-center justify-center rounded-[5px] border border-border bg-surface">
-              <CategoryIcon icon={icon} size={13} />
-            </span>
-            <select
-              value={icon}
-              onChange={(event) => setIcon(event.target.value)}
-              aria-label={t("ledger.categories.icon")}
-              className="h-[27px] rounded-[5px] border border-border bg-surface px-1.5 text-[12px]"
-            >
-              {CATEGORY_ICON_KEYS.map((key) => (
-                <option key={key} value={key}>
-                  {key}
-                </option>
-              ))}
-            </select>
-          </span>
+          <CategoryIconPicker
+            value={iconTouched ? icon : icon || guessCategoryIcon(name) || "dots"}
+            onChange={(key) => {
+              setIcon(key);
+              setIconTouched(true);
+            }}
+            t={t}
+          />
           <Input
             value={description}
             onChange={(event) => setDescription(event.target.value)}
@@ -2168,23 +2164,11 @@ function LedgerSettingsTab() {
                     <option value="expense">{t("ledger.kind.expense")}</option>
                     <option value="income">{t("ledger.kind.income")}</option>
                   </select>
-                  <span className="flex items-center gap-1">
-                    <span className="flex size-[24px] items-center justify-center rounded-[4px] border border-border bg-panel">
-                      <CategoryIcon icon={draft.icon} size={12} />
-                    </span>
-                    <select
-                      value={draft.icon}
-                      onChange={(event) => setDraft((d) => ({ ...d, icon: event.target.value }))}
-                      aria-label={t("ledger.categories.icon")}
-                      className="h-[24px] rounded-[4px] border border-border bg-panel px-1 text-[11.5px]"
-                    >
-                      {CATEGORY_ICON_KEYS.map((key) => (
-                        <option key={key} value={key}>
-                          {key}
-                        </option>
-                      ))}
-                    </select>
-                  </span>
+                  <CategoryIconPicker
+                    value={draft.icon || guessCategoryIcon(draft.name) || "dots"}
+                    onChange={(key) => setDraft((d) => ({ ...d, icon: key }))}
+                    t={t}
+                  />
                   <span className="flex-1" />
                   <Button
                     variant="primary"
@@ -2197,7 +2181,7 @@ function LedgerSettingsTab() {
                           parent: def.parent,
                           newName: draft.name.trim(),
                           newParent: draft.parent,
-                          icon: draft.icon,
+                          icon: draft.icon || guessCategoryIcon(draft.name),
                           kind: draft.kind,
                           description: draft.description,
                         })
@@ -2231,7 +2215,7 @@ function LedgerSettingsTab() {
                     └
                   </span>
                 ) : null}
-                <CategoryIcon icon={def.icon} size={12} className="shrink-0 text-muted-foreground" />
+                <CategoryIcon icon={categoryIconKey(def)} size={12} className="shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate">{def.name}</span>
                 {def.parent ? (
                   <span className="shrink-0 text-[10px] text-faint">{def.parent}</span>

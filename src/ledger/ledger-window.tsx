@@ -41,6 +41,7 @@ import { useVirtualWindow } from "./use-virtual-window";
 import {
   CategoryIcon,
   CategorySelect,
+  categoryIconKey,
   categoryMatches,
   categoryPath,
   orderedCategories,
@@ -2467,7 +2468,7 @@ function EntriesTab({
   // find，3200 行就是 3200 次线性查找，纯属白花时间。
   const iconByPath = React.useMemo(() => {
     const map = new Map<string, string>();
-    for (const def of categories) map.set(categoryPath(def), def.icon);
+    for (const def of categories) map.set(categoryPath(def), categoryIconKey(def));
     return map;
   }, [categories]);
   const projectNameById = React.useMemo(() => {

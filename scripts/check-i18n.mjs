@@ -61,7 +61,7 @@ const entrySources = ["manual", "wechat", "alipay"];
 const menuBarModes = ["stock", "dailyPnl", "totalPnl", "bothPnl", "none"];
 const themes = ["system", "light", "dark"];
 const colorSchemes = ["chinese", "western"];
-const markets = ["a", "hk", "us", "kr"];
+const markets = ["a", "hk", "us", "kr", "fund"];
 const sessions = ["pre", "open", "lunch", "post", "night", "closed", "weekend"];
 
 const templated = [];
@@ -80,6 +80,15 @@ addFamily("settings.theme", themes);
 addFamily("settings.colors", colorSchemes);
 addFamily("market", markets);
 addFamily("session", sessions);
+
+// 分类图标的标签：key 直接读 categories.tsx 里那张表，加图标不会漏翻译
+const iconTable = readFileSync("src/ledger/categories.tsx", "utf8").match(
+  /const ICONS: Record<string, LucideIcon> = \{([\s\S]*?)\n\};/,
+);
+if (!iconTable) throw new Error("categories.tsx 里找不到 ICONS 表");
+const iconKeys = [...iconTable[1].matchAll(/^\s{2}([a-z]+):/gm)].map((m) => m[1]);
+if (iconKeys.length === 0) throw new Error("ICONS 表是空的");
+addFamily("ledger.icon", iconKeys);
 
 for (const [key, file] of templated) {
   if (!used.has(key)) used.set(key, file);
