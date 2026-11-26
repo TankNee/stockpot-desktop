@@ -436,14 +436,16 @@ export function LedgerProvider({ children }: { children: React.ReactNode }) {
     let unlisten: (() => void) | undefined;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<{ data?: { settings?: { language?: string; theme?: string } } }>(
-        "settings-changed",
-        (event) => {
-          const settings = event.payload?.data?.settings;
-          if (settings?.language) setLang(settings.language as Lang);
-          if (settings?.theme) setTheme(settings.theme);
-        },
-      );
+      unlisten = await listen<{
+        data?: { settings?: { language?: string; theme?: string; colorScheme?: string } };
+      }>("settings-changed", (event) => {
+        const settings = event.payload?.data?.settings;
+        if (settings?.language) setLang(settings.language as Lang);
+        if (settings?.theme) setTheme(settings.theme);
+        // 配色方案以前漏了：在设置里把「涨红跌绿」换成「绿涨红跌」，
+        // 股票页立刻变，这个窗口要重开才跟上，看着就像两边颜色不同步
+        if (settings?.colorScheme) setColorScheme(settings.colorScheme);
+      });
     })();
     return () => unlisten?.();
   }, []);
