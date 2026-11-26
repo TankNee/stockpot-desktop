@@ -2189,7 +2189,13 @@ function LedgerSettingsTab() {
                           setLedger(next);
                           setEditing(null);
                         })
-                        .catch((err: unknown) => setError(String(err)))
+                        .catch((err: unknown) =>
+                          setError(
+                            String(err).includes("duplicate")
+                              ? t("ledger.categories.duplicate")
+                              : String(err),
+                          ),
+                        )
                     }
                   >
                     <Check size={10} strokeWidth={2.8} />

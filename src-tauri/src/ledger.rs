@@ -2401,6 +2401,23 @@ impl LedgerState {
         } else {
             format!("{parent}/{name}")
         };
+        // 改名撞上已有分类就拒掉：两个同名同级分类会让手机端的列表 key 重复，
+        // LazyColumn 一滑到第二条就抛 "Key was already used" 崩掉。
+        let next_name = if new_name.trim().is_empty() { name } else { new_name.trim() };
+        let next_path = if new_parent.is_empty() {
+            next_name.to_string()
+        } else {
+            format!("{new_parent}/{next_name}")
+        };
+        if next_path != old_path
+            && ledger
+                .categories
+                .iter()
+                .any(|c| c.parent == new_parent && c.name == next_name)
+        {
+            return Err("duplicate".into());
+        }
+
         let Some(def) = ledger
             .categories
             .iter_mut()
@@ -3529,6 +3546,30 @@ mod tests {
         // Deleting a group takes its leaves with it.
         let after = state.delete_category("宠物用品").unwrap();
         assert!(after.categories.iter().all(|c| !c.path().starts_with("宠物用品")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_name_is_rejected() {
+        // 两个同名同级分类会让手机端列表 key 重复（LazyColumn 直接崩），源头拦住
+        let (state, dir) = temp_state();
+        // 默认账本里有餐饮/交通这些，挑两个不在默认表里的名字
+        state.add_category("宠物", "", "pet", "expense", "").unwrap();
+        state.add_category("装修", "", "repair", "expense", "").unwrap();
+
+        let err = state
+            .update_category("装修", "", "宠物", "", "", "", "")
+            .unwrap_err();
+        assert_eq!(err, "duplicate");
+        // 只是改描述不算撞名，照常放行
+        let ok = state
+            .update_category("装修", "", "装修", "", "", "", "刷墙、换地板")
+            .unwrap();
+        assert_eq!(
+            ok.categories.iter().find(|c| c.name == "装修").unwrap().description,
+            "刷墙、换地板"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
