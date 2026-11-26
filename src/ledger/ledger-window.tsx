@@ -2356,6 +2356,11 @@ const ROW_H = 39;
 /** 带退款的那行金额下面多一行小字。 */
 const ROW_TALL_H = 44;
 const DAY_H = 27;
+/** 搜索态的段头（本月 / 其他月份）。 */
+const SECTION_H = 30;
+/** 搜索跨月时日期列要放下年份，窄了会挤到时间上。 */
+const GRID_TIGHT = "grid-cols-[92px_1fr_84px_96px_104px_76px]";
+const GRID_WIDE = "grid-cols-[108px_1fr_84px_96px_104px_76px]";
 /** 归档块不做窗口化（它是另开的一段，跟主表共用滚动），所以封顶。 */
 const ARCHIVED_CAP = 200;
 /** 退款候选同理：挑一条就够，没必要把几千行都塞进那个小弹窗。 */
@@ -2404,13 +2409,17 @@ function EntriesTab({
     entriesViewState = { kind, query, category, day, refundedOnly, showArchived, grouped, sort };
   }, [projectId, kind, query, category, day, refundedOnly, showArchived, grouped, sort]);
 
+  // 有关键词就跨月找：搜「星巴克」不该因为你正好翻到 10 月就查不到 11 月那笔。
+  // 项目页本来就跨月，不受影响。
+  const searching = !projectId && query.trim().length > 0;
+
   const rows = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     return (ledger?.entries ?? []).filter((entry) => {
       // A project's page is about that project, not about one month.
       if (projectId) {
         if (entry.projectId !== projectId) return false;
-      } else if (monthOf(entry.date) !== month) {
+      } else if (!q && monthOf(entry.date) !== month) {
         return false;
       }
       if (day && entry.date !== day) return false;
@@ -2431,7 +2440,13 @@ function EntriesTab({
   const archivedRows = React.useMemo(() => rows.filter((entry) => entry.archived), [rows]);
 
   const ordered = React.useMemo(() => {
-    if (sort === "date") return live;
+    if (sort === "date") {
+      if (!searching) return live;
+      // 跨月搜索时不能指望 entries 的存储顺序按月分段，显式按日期+时间倒序
+      return [...live].sort(
+        (a, b) => b.date.localeCompare(a.date) || (b.time ?? "").localeCompare(a.time ?? ""),
+      );
+    }
     const sign = sort === "amount-desc" ? -1 : 1;
     const value = (entry: LedgerEntry) =>
       entry.kind === "expense" ? effectiveAmount(entry) : entry.amount;
@@ -2440,7 +2455,18 @@ function EntriesTab({
     return [...live].sort(
       (a, b) => sign * (value(a) - value(b)) || b.date.localeCompare(a.date),
     );
-  }, [live, sort]);
+  }, [live, sort, searching]);
+
+  // 搜索态：本月在前，其余月份另起一段。分段的笔数也拿去当段头。
+  const segments = React.useMemo(() => {
+    if (!searching) return null;
+    const thisMonth: LedgerEntry[] = [];
+    const others: LedgerEntry[] = [];
+    for (const entry of ordered) {
+      (monthOf(entry.date) === month ? thisMonth : others).push(entry);
+    }
+    return { thisMonth, others };
+  }, [searching, ordered, month]);
 
   const archivedCount = React.useMemo(
     () =>
@@ -2481,8 +2507,34 @@ function EntriesTab({
   // 所以两条路径各自摊一份。
   type Item =
     | { kind: "day"; date: string; group: (typeof groups)[number] }
+    | { kind: "section"; id: string; title: string; count: number; dashed: boolean }
     | { kind: "row"; entry: LedgerEntry };
   const items = React.useMemo<Item[]>(() => {
+    if (segments) {
+      // 搜索态平铺，不摆日期头：跨月之后同一天可能隔着好几个月出现，日期头反而添乱。
+      const out: Item[] = [];
+      if (segments.thisMonth.length > 0) {
+        out.push({
+          kind: "section",
+          id: "this",
+          title: t("ledger.search.thisMonth"),
+          count: segments.thisMonth.length,
+          dashed: false,
+        });
+        for (const entry of segments.thisMonth) out.push({ kind: "row", entry });
+      }
+      if (segments.others.length > 0) {
+        out.push({
+          kind: "section",
+          id: "others",
+          title: t("ledger.search.others"),
+          count: segments.others.length,
+          dashed: out.length > 0,
+        });
+        for (const entry of segments.others) out.push({ kind: "row", entry });
+      }
+      return out;
+    }
     if (sort === "date" && grouped) {
       const out: Item[] = [];
       for (const bucket of groups) {
@@ -2492,16 +2544,18 @@ function EntriesTab({
       return out;
     }
     return ordered.map((entry) => ({ kind: "row", entry }));
-  }, [groups, ordered, sort, grouped]);
+  }, [groups, ordered, sort, grouped, segments, t]);
 
   const listRef = React.useRef<HTMLDivElement>(null);
   const viewport = useScrollViewport();
   // 行高必须和 EntryRow / 日期头里写死的 style.height 一致，否则滚到后面会越算越偏。
   const heights = React.useMemo(
     () =>
-      items.map((item) =>
-        item.kind === "day" ? DAY_H : (item.entry.refundedAmount ?? 0) > 0 ? ROW_TALL_H : ROW_H,
-      ),
+      items.map((item) => {
+        if (item.kind === "day") return DAY_H;
+        if (item.kind === "section") return SECTION_H;
+        return (item.entry.refundedAmount ?? 0) > 0 ? ROW_TALL_H : ROW_H;
+      }),
     [items],
   );
   const offsets = React.useMemo(() => offsetsOf(heights), [heights]);
@@ -2574,9 +2628,13 @@ function EntriesTab({
           size="sm"
           aria-pressed={grouped}
           aria-label={t("ledger.entries.groupByDay")}
-          disabled={sort !== "date"}
+          // 搜索态固定平铺（本月 / 其他月份两段），分组开关在这里没有意义
+          disabled={sort !== "date" || searching}
           onClick={() => setGrouped((v) => !v)}
-          className={cn("h-[26px] gap-1 px-1.5 text-[11.5px]", grouped && sort === "date" && "text-accent")}
+          className={cn(
+            "h-[26px] gap-1 px-1.5 text-[11.5px]",
+            grouped && sort === "date" && !searching && "text-accent",
+          )}
         >
           <Rows3 size={11} strokeWidth={2.2} />
           {t("ledger.entries.groupByDay")}
@@ -2604,16 +2662,24 @@ function EntriesTab({
         ) : null}
         <span className="flex-1" />
         <span className="num text-[11.5px] text-faint">
-          {t("ledger.filter.summary", {
-            count: live.length,
-            expense: formatCents(total.expense, lang),
-            income: formatCents(total.income, lang),
-          })}
+          {segments
+            ? // 跨月总额容易被当成「这个月花了多少」，搜索态只说笔数
+              t("ledger.search.summary", { n: live.length })
+            : t("ledger.filter.summary", {
+                count: live.length,
+                expense: formatCents(total.expense, lang),
+                income: formatCents(total.income, lang),
+              })}
         </span>
       </div>
 
       <div className="overflow-hidden rounded-[7px] border border-hairline/70">
-        <div className="grid grid-cols-[92px_1fr_84px_96px_104px_76px] items-center gap-2 border-b border-hairline/70 bg-surface/60 px-3 py-[6px] text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+        <div
+          className={cn(
+            "grid items-center gap-2 border-b border-hairline/70 bg-surface/60 px-3 py-[6px] text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground",
+            searching ? GRID_WIDE : GRID_TIGHT,
+          )}
+        >
           <span>{t("ledger.col.date")}</span>
           <span>{t("ledger.col.detail")}</span>
           <span>{t("ledger.col.category")}</span>
@@ -2622,13 +2688,34 @@ function EntriesTab({
           <span className="text-right">{t("ledger.col.actions")}</span>
         </div>
         {live.length === 0 ? (
-          <p className="px-3 py-8 text-center text-[12px] text-faint">{t("ledger.entries.empty")}</p>
+          <p className="px-3 py-8 text-center text-[12px] text-faint">
+            {searching ? t("ledger.search.empty", { query: query.trim() }) : t("ledger.entries.empty")}
+          </p>
         ) : (
           // 只渲染视口里那几十行。总数靠外层这个 height 撑住，滚动条才不会跳。
           <div ref={listRef} style={{ height: listHeight }}>
             <div style={{ transform: `translateY(${windowed.padTop}px)` }}>
               {shown.map((item) =>
-                item.kind === "day" ? (
+                item.kind === "section" ? (
+                  <div
+                    key={`s-${item.id}`}
+                    style={{ height: SECTION_H }}
+                    className={cn(
+                      "flex items-center gap-2 px-3 text-[11px]",
+                      item.dashed
+                        ? "border-t border-dashed border-hairline"
+                        : "border-b border-hairline/40 bg-surface/40",
+                    )}
+                  >
+                    <span className="font-semibold tracking-[0.04em] text-muted-foreground">
+                      {item.title}
+                    </span>
+                    <span className="num text-[10.5px] text-faint">
+                      {t("ledger.entries.dayCount", { n: item.count })}
+                    </span>
+                    <span className="flex-1" />
+                  </div>
+                ) : item.kind === "day" ? (
                   <div
                     key={`d-${item.date}`}
                     style={{ height: DAY_H }}
@@ -2662,6 +2749,7 @@ function EntriesTab({
                     projectName={
                       item.entry.projectId ? (projectNameById.get(item.entry.projectId) ?? "") : ""
                     }
+                    showYear={searching}
                     confirmId={confirmId}
                     setConfirmId={setConfirmId}
                     onEdit={onEdit}
@@ -2692,6 +2780,7 @@ function EntriesTab({
                 t={t}
                 icon={iconByPath.get(entry.category) ?? "dots"}
                 projectName={entry.projectId ? (projectNameById.get(entry.projectId) ?? "") : ""}
+                showYear={searching}
                 confirmId={confirmId}
                 setConfirmId={setConfirmId}
                 onEdit={onEdit}
@@ -2711,7 +2800,9 @@ function EntriesTab({
       <p className="text-[11px] text-faint">
         {projectId
           ? t("ledger.entries.hintProject", { n: live.length })
-          : t("ledger.entries.hintMonth", { month })}
+          : segments
+            ? t("ledger.search.hint", { n: live.length })
+            : t("ledger.entries.hintMonth", { month })}
       </p>
     </div>
   );
@@ -2725,6 +2816,7 @@ function EntryRow({
   t,
   icon,
   projectName,
+  showYear = false,
   confirmId,
   setConfirmId,
   onEdit,
@@ -2737,6 +2829,8 @@ function EntryRow({
   /** 图标和项目名由调用方查好：一行一次 find，几千行就是几千次。 */
   icon: string;
   projectName: string;
+  /** 跨月搜索时日期要带年份，否则 25-11-22 和 26-11-22 看起来是同一行。 */
+  showYear?: boolean;
   confirmId: string | null;
   setConfirmId: (id: string | null) => void;
   onEdit: (entry: LedgerEntry) => void;
@@ -2750,13 +2844,14 @@ function EntryRow({
       onClick={() => onSelect(entry)}
       style={{ height: tall ? ROW_TALL_H : ROW_H }}
       className={cn(
-        "entry-row group grid cursor-pointer grid-cols-[92px_1fr_84px_96px_104px_76px] items-center gap-2 px-3",
+        "entry-row group grid cursor-pointer items-center gap-2 px-3",
+        showYear ? GRID_WIDE : GRID_TIGHT,
         "border-b border-hairline/40 transition-colors duration-150 last:border-b-0",
         "hover:bg-[color-mix(in_oklch,var(--surface)_75%,transparent)]",
       )}
     >
       <span className="num whitespace-nowrap text-[11.5px] text-faint">
-        {entry.date.slice(5)}
+        {showYear ? entry.date.slice(2) : entry.date.slice(5)}
         {entry.time ? <span className="ml-1 opacity-70">{entry.time}</span> : null}
       </span>
       <span className="flex min-w-0 items-center gap-1.5">
