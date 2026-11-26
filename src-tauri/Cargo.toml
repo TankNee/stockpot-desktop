@@ -1,6 +1,6 @@
 [package]
 name = "stockpot"
-version = "1.0.14"
+version = "1.0.15"
 description = "Stockpot — a quiet menu bar stock ticker for A-shares, Hong Kong, US and Korean markets"
 authors = ["Stockpot"]
 edition = "2024"
